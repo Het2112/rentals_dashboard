@@ -1,19 +1,46 @@
+"""Command-line statement importer for users who prefer folders over the UI."""
+
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
-from app.parser import AppFolioParser
+
 from app.processor import PortfolioManager
 
-# 1. Initialize
-pdf_path = Path("monthly_statements/Owner packet (19).pdf")
-excel_path = Path("data/Rental_Portfolio.xlsx")
 
-parser = AppFolioParser(pdf_path)
-manager = PortfolioManager(excel_path)
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Import AppFolio statements into Rental_Portfolio.xlsx"
+    )
+    parser.add_argument(
+        "paths", nargs="+", type=Path, help="PDF files or directories containing PDFs"
+    )
+    parser.add_argument(
+        "--allow-revisions",
+        action="store_true",
+        help="Import changed PDFs for existing periods",
+    )
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parent
+    manager = PortfolioManager(root / "data" / "Rental_Portfolio.xlsx")
+    pdfs = []
+    for path in args.paths:
+        pdfs.extend(sorted(path.glob("*.pdf")) if path.is_dir() else [path])
+    for pdf in pdfs:
+        parsed, state, _ = manager.analyze_statement(pdf)
+        if state == "duplicate":
+            print(f"SKIP duplicate: {pdf}")
+            continue
+        if state == "revision" and not args.allow_revisions:
+            print(f"SKIP revision (use --allow-revisions): {pdf}")
+            continue
+        result = manager.commit_statement(
+            parsed, pdf.name, allow_revision=args.allow_revisions
+        )
+        print(
+            f"{result['status'].upper()}: {pdf} -> {result['filename']} ({result['transactions']} transactions, {result['warnings']} warnings)"
+        )
 
-# 2. Extract
-df = parser.parse_and_validate()
 
-# 3. Save
-if not df.empty:
-    manager.append_transactions(df)
-else:
-    print("⚠️ No transactions found to save.")
+if __name__ == "__main__":
+    main()

@@ -1,122 +1,115 @@
-📊 Rental Portfolio Analytics Dashboard
-1. Project Vision & Goals
-The objective of this project is to build a high-performance, centralized financial intelligence dashboard to track a growing portfolio of residential rental units.
+# Rental Portfolio Dashboard
 
-When managing multiple properties, financial data often becomes fragmented across automated property management platforms (such as AppFolio), bank statements, and out-of-pocket expenses paid directly by owners (e.g., local property taxes, insurance premiums, or emergency repairs).
+A private, local Streamlit application for importing AppFolio owner-statement PDFs, recording owner-paid expenses, and analyzing property, unit, debt, equity, NOI, CapEx, and cash-flow performance. No AppFolio credentials or browser automation are used.
 
-This project solves that fragmentation by providing a unified web-based interface that acts as the single source of truth for all income and expense items. The final system delivers:
+## What it does
 
-Unified Financial Visibility: A single master ledger that handles both automated digital imports and manual entries seamlessly.
+- Imports one or many historical owner-statement PDFs through the UI or CLI.
+- Extracts consolidated property summaries, multipage transaction tables, and work-order financial details.
+- Renames statements consistently and tracks SHA-256 checksums, periods, parser versions, and revisions.
+- Skips exact duplicates and requires confirmation before replacing an existing period with a revision.
+- Stores approved data in `data/Rental_Portfolio.xlsx` with timestamped backups and atomic writes.
+- Records owner-paid items through a form or CSV/Excel upload.
+- Separates maintenance/operating expenses from capital improvements, debt, and owner transfers.
+- Calculates monthly property and portfolio metrics and creates Streamlit and Excel charts.
+- Supports properties, units, manually entered valuations, and amortized loans.
 
-Real-Time Cash Flow Analytics: Immediate visualization of key performance indicators (KPIs) to monitor the financial health of the assets.
+## Financial treatment
 
-Operational Clarity: A scalable tool built to analyze net operational income, identify expense leaks, and track historical portfolio trends over time.
+- **NOI** = operating revenue − operating expenses.
+- **Maintenance / Operating Expense** reduces NOI.
+- **Capital Improvement / CapEx** does not reduce NOI, but reduces cash flow and adds to invested capital.
+- **Mortgage principal and interest** are excluded from NOI and included in after-debt cash flow.
+- **Owner contributions and distributions** are transfers, not revenue or expenses.
+- **Capital gain** applies when an asset is sold; it is not used as a repair classification.
 
-2. System Architecture & Technical Journey
-The platform is designed around a decoupled architecture separating data processing from presentation.
+The dashboard is an investment-analysis tool, not tax or accounting advice.
 
-       [ Raw Property Reports ]
-                  │
-                  ▼
-     ┌────────────────────────┐
-     │    run_pipeline.py     │  (Data Cleaning & Standardization)
-     └────────────┬───────────┘
-                  │
-                  ▼
-     ┌────────────────────────┐
-     │ Rental_Portfolio.csv   │  (The Central Source of Truth)
-     └────────────┬───────────┘
-                  │
-                  ▼
-     ┌────────────────────────┐
-     │      dashboard.py      │  (Streamlit Web Interface)
-     └────────────────────────┘
-Technical History & Key Architectural Decisions:
-During development, we navigated specific format constraints that informed our current engineering design:
+## Install and run
 
-Excel Mismatch (.xlsx): The ingestion pipeline originally targeted a Microsoft Excel format. However, because the workflow utilizes Apple Numbers on macOS locally, parsing binary Excel structures led to configuration and engine issues (OptionError) within the containerized Python environment.
+Python 3.11 or newer is required.
 
-Native Apple Numbers (.numbers): We attempted to read native Apple Numbers files directly via the numbers-parser library. However, Numbers spreadsheets inherently format empty grids with padded null objects, causing ValueError: Duplicate column names found: [None, None...] when converting to data frames.
+### macOS/Linux
 
-The Solution (CSV Standard): To establish a robust, platform-agnostic, and fast data exchange, we transitioned the master datastore entirely to a flat Comma-Separated Values format (data/Rental_Portfolio.csv). This approach avoids proprietary file format locks, executes efficiently in Pandas, and remains natively editable across both Excel and Apple Numbers.
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/streamlit run app/main.py
+```
 
-3. Current Implementation Status
-We have successfully engineered Phase 1 of the platform:
+Or run:
 
-Data Pipeline (app/processor.py & run_pipeline.py): An automated python pipeline that cleans raw transaction inputs, standardizes column mapping, and systematically appends new historical data to the master CSV storage without overwriting past entries.
+```bash
+./run.sh
+```
 
-Central Datastore (data/Rental_Portfolio.csv): A clean, flat schema containing structural financial columns: Date, Payee, Type, Ref, Description, Cash In, Cash Out, and Balance.
+### Windows PowerShell
 
-Web Dashboard UI (dashboard.py): A frontend application powered by Streamlit that:
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install -e .
+.venv\Scripts\streamlit run app/main.py
+```
 
-Dynamically monitors the local file system for the presence of the data file.
+Streamlit prints a private local URL, normally `http://localhost:8501`.
 
-Ingests and cleans currency anomalies on the fly using Pandas.
+## First use
 
-Renders an interactive, searchable transaction ledger directly on screen.
+1. Open **Statements and Imports**.
+2. Upload one or more AppFolio owner-statement PDFs.
+3. Select **Analyze statements**.
+4. Review the detected periods, properties, totals, and warnings.
+5. Import new statements or explicitly approve revisions.
+6. Open **Properties, Units, Loans & Values** and complete the automatically discovered property records.
+7. Add the nine units and loan/valuation information.
+8. Record expenses paid outside AppFolio under **Owner-Paid Expenses**.
 
-Maintains aggregate metric cards tracking Total Cash In, Total Cash Out, and Net Cash Flow.
+The application stores downloaded/imported copies under `data/statements/YYYY/`. Runtime data, statements, backups, and spreadsheets are intentionally ignored by Git.
 
-4. Phased Roadmap (Next Steps)
-We are currently executing a programmatic, step-by-step rollout to build out full capability:
+## External-expense uploads
 
-🟩 Phase 1: Manual Expense Tracking (Next Up)
-Objective: Capture out-of-pocket expenses that never pass through automated agency ledgers (e.g., owner-funded maintenance, legal setup fees, property taxes).
+Download the CSV template from the **Owner-Paid Expenses** page. Required values are:
 
-Feature: Implement an intuitive input form embedded inside the Streamlit sidebar to capture Date, Payee, Amount, and Description.
+- `date`
+- `property_id`
+- `description`
+- positive `amount`
+- `financial_classification`
 
-Mechanism: Programmatically append entries to Rental_Portfolio.csv in real-time and trigger a UI state refresh (st.rerun()) to update the aggregated charts instantly.
+Valid classifications are shown in the UI and the workbook's `Lists` worksheet. Previewed rows are validated and deduplicated before they are appended.
 
-⬜ Phase 2: Advanced Visual Analytics
-Objective: Replace raw text tables with visual pattern discovery.
+## Command-line imports
 
-Feature 1: Chronological line/bar charts tracking Monthly Net Cash Flow trends to visualize cyclical performance.
+```bash
+.venv/bin/python run_pipeline.py /path/to/statement.pdf
+.venv/bin/python run_pipeline.py /path/to/folder
+.venv/bin/python run_pipeline.py --allow-revisions /path/to/revised.pdf
+```
 
-Feature 2: Category-specific allocation breakdown charts (e.g., tracking total capital expenditure vs. recurring management fees) to isolate where capital is deployed.
+Without `--allow-revisions`, the CLI safely skips a changed PDF for an already imported period.
 
-⬜ Phase 3: Dynamic Multi-Attribute Filtering
-Objective: Provide analytical granular control for portfolio scanning.
+## Workbook safety
 
-Feature: Build sidebar filtration controls allowing users to isolate data by specific calendar date ranges, transaction types (Income vs. Expense), or unique keyword patterns.
+The workbook is the persistent source of truth. Every write:
 
-⬜ Phase 4: Production Polishing & Optimization
-Objective: Prepare the tool for lightning-fast handling as data scales over several years.
+1. Acquires a local lock.
+2. Creates a timestamped backup.
+3. Saves to a temporary workbook.
+4. Reopens the temporary file to validate it.
+5. Atomically replaces the live workbook.
 
-Feature: Refine caching layers (st.cache_data) to prevent repetitive disk reads, formalize structural error handling for data edge cases, and visually brand the interface for maximum presentation utility.
+Close the workbook in Excel or Apple Numbers before saving changes from Streamlit. If the process is forcibly terminated and no dashboard process remains, a stale `.lock` file may need to be removed manually.
 
-5. Quickstart for Developers
-Environment Setup
-This repository uses uv for lightning-fast, predictable Python dependency management.
+## Tests
 
-Install dependencies into your local virtual environment:
+```bash
+.venv/bin/pytest -q
+```
 
-Bash
-uv pip install -r requirements.txt
-Run the ingestion pipeline to import your latest properties data:
+The local regression suite validates the representative statement, multipage parsing, work orders, reconciliation, duplicate/revision behavior, workbook backups, external-expense deduplication, amortization, and financial formulas. The real statement is local-only because it contains private data.
 
-Bash
-uv run python run_pipeline.py
-Launch the local interactive UI dashboard:
+## Data model
 
-Bash
-uv run streamlit run dashboard.py
-Core Directory Layout
-dashboard.py: Renders the Streamlit application framework and financial metrics.
+The workbook contains sheets for properties, units, loans, loan adjustments, statements, property summaries, normalized transactions, external expenses, valuations, work orders, monthly metrics, import warnings, lists, and Excel dashboards.
 
-run_pipeline.py: The execution trigger for extracting and cleaning incoming files.
-
-app/processor.py: Core processing backend engine defining the transformation parameters.
-
-data/: Secure directory housing the structural file asset (Rental_Portfolio.csv).
-
-
-## 2. Status: What We Have Achieved
-*   **Data Architecture**: Established `data/Rental_Portfolio.csv` as the system's "Source of Truth".
-*   **Data Pipeline**: Built an automated `run_pipeline.py` script.
-*   **Dashboard Foundation**: Created a functional Streamlit UI that calculates real-time KPIs.
-*   **Manual Entry Framework**: Integrated a sidebar form for manual expense logging.
-
-## 3. The Roadmap (Next Steps)
-*   **[DEBUGGING] Manual Expense Logging**: The current implementation of the manual entry form needs troubleshooting to ensure it correctly updates `Rental_Portfolio.csv` without formatting conflicts.
-*   **Advanced Visualization**: Implement monthly cash flow charts and expense category breakdowns.
-*   **Interactive Filtering**: Add sidebar controls to filter data by date ranges and transaction types.
+Stable IDs connect records even when a displayed property or unit name changes. A newly encountered statement property is created with `Needs review` type so it can be completed in the property editor without losing its transaction mapping.

@@ -1,5 +1,16 @@
 __pycache__/
 .DS_Store
 .venv/
+*.egg-info/
 .env
 .pytest_cache/
+.coverage
+htmlcov/
+data/*.xlsx
+data/*.xlsx.lock
+data/backups/
+data/statements/
+data/uploads/
+data/logs/
+data/*.csv
+monthly_statements/*.pdf

@@ -1,10 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "rental-tracker"
-version = "0.1.0"
+name = "rental-portfolio-dashboard"
+version = "1.0.0"
+description = "Private, workbook-backed rental investment analytics dashboard"
+requires-python = ">=3.11"
 dependencies = [
-    "pdfplumber", "pandas", "openpyxl", "streamlit", "playwright", "plotly"
+    "openpyxl>=3.1",
+    "pandas>=2.1",
+    "pdfplumber>=0.11",
+    "plotly>=5.18",
+    "streamlit>=1.35",
 ]
 
-[project.scripts]
-# This allows 'uv run' to start the app
-start = "streamlit run app/main.py"
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
