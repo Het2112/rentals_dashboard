@@ -1,0 +1,10 @@
+[project]
+name = "rental-tracker"
+version = "0.1.0"
+dependencies = [
+    "pdfplumber", "pandas", "openpyxl", "streamlit", "playwright", "plotly"
+]
+
+[project.scripts]
+# This allows 'uv run' to start the app
+start = "streamlit run app/main.py"
