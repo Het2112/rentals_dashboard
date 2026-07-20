@@ -20,6 +20,7 @@ import plotly.express as px  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from app.processor import PortfolioManager  # noqa: E402
+from app.finance import summarize_cash_performance  # noqa: E402
 from app.schema import FINANCIAL_CLASSIFICATIONS  # noqa: E402
 
 DATA_DIR = ROOT / "data"
@@ -31,82 +32,157 @@ store = manager.store
 
 
 def money(value) -> str:
-    return f"${float(value or 0):,.2f}"
+    amount = float(value or 0)
+    return f"-${abs(amount):,.2f}" if amount < 0 else f"${amount:,.2f}"
+
+
+def ui_number(value) -> float:
+    try:
+        return 0.0 if pd.isna(value) else float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def ui_date(value):
+    parsed = pd.to_datetime(value, errors="coerce")
+    return parsed.date() if pd.notna(parsed) else pd.Timestamp.today().date()
 
 
 def portfolio_overview() -> None:
-    st.title("Rental Portfolio Overview")
+    st.title("My Rental Investment Summary")
+    st.caption(
+        "A simple cash view of whether your rentals put money in your pocket or required additional cash."
+    )
     metrics = store.read("Monthly_Metrics")
     if metrics.empty:
         st.info(
             "Import an AppFolio statement and complete property details to begin analysis."
         )
         return
-    for col in [
-        "operating_revenue",
-        "operating_expenses",
-        "noi",
-        "capex",
-        "cash_flow_after_debt",
-    ]:
-        metrics[col] = pd.to_numeric(metrics[col], errors="coerce").fillna(0)
-    latest = metrics[
-        metrics["period"].astype(str) == metrics["period"].astype(str).max()
-    ]
-    cols = st.columns(5)
-    for widget, label, column in zip(
-        cols,
-        ["Revenue", "Operating expenses", "NOI", "CapEx", "Cash flow"],
+    scope = st.segmented_control(
+        "Time period",
+        ["Latest month", "Year to date", "Trailing 12 months", "All time"],
+        default="Trailing 12 months",
+    )
+    summary, period_label = summarize_cash_performance(
+        metrics,
+        store.read("Properties"),
+        store.read("Loans"),
+        scope or "Trailing 12 months",
+    )
+    if summary.empty:
+        st.info("There is no activity in this period.")
+        return
+    total_income = summary["operating_revenue"].sum()
+    operating_costs = summary["operating_expenses"].sum()
+    mortgage_payments = summary["debt_service"].sum()
+    improvements = summary["capex"].sum()
+    total_costs = operating_costs + mortgage_payments + improvements
+    cash_result = summary["cash_flow_after_debt"].sum()
+    result_word = (
+        "PROFIT"
+        if cash_result > 0.005
+        else "LOSS"
+        if cash_result < -0.005
+        else "BREAK-EVEN"
+    )
+    incomplete = summary[summary["setup_status"] != "Complete"]
+    headline = "Cash profit / loss" if incomplete.empty else "Preliminary cash result"
+    st.subheader(period_label)
+    hero, income_col, cost_col, equity_col = st.columns([1.5, 1, 1, 1])
+    hero.metric(headline, money(cash_result), result_word)
+    income_col.metric("Rent and other income", money(total_income))
+    cost_col.metric("All cash costs", money(total_costs))
+    equity_col.metric(
+        "Mortgage principal paid",
+        money(summary["mortgage_principal"].sum()),
+        help="Principal reduces your cash today but builds property equity.",
+    )
+    if incomplete.empty:
+        if cash_result >= 0:
+            st.success(
+                f"Your rentals generated {money(cash_result)} in cash profit for this period."
+            )
+        else:
+            st.error(
+                f"Your rentals used {money(abs(cash_result))} more cash than they generated for this period."
+            )
+    else:
+        names = ", ".join(incomplete["property_name"].astype(str))
+        st.warning(
+            f"This result is preliminary because financing setup is incomplete for: {names}. "
+            "Complete each property's cash-or-mortgage information so mortgage payments are not treated as zero."
+        )
+    st.info(
+        "Accuracy reminder: add taxes, insurance, HOA, repairs, and other costs you paid directly under Owner-Paid Expenses. "
+        "Unrealized property appreciation is not counted as cash profit."
+    )
+    investor_table = summary.assign(
+        **{
+            "Property": summary["property_name"],
+            "Result": summary["result"],
+            "Cash profit / loss": summary["cash_flow_after_debt"],
+            "Income": summary["operating_revenue"],
+            "Operating costs": summary["operating_expenses"],
+            "Mortgage payments": summary["debt_service"],
+            "Capital improvements": summary["capex"],
+            "Setup": summary["setup_status"],
+        }
+    )[
         [
-            "operating_revenue",
-            "operating_expenses",
-            "noi",
-            "capex",
-            "cash_flow_after_debt",
-        ],
-    ):
-        widget.metric(label, money(latest[column].sum()))
-    period_dates = pd.to_datetime(metrics["period"].astype(str) + "-01")
-    latest_date = period_dates.max()
-    ytd = metrics[period_dates.dt.year == latest_date.year]
-    trailing = metrics[period_dates >= latest_date - pd.DateOffset(months=11)]
-    st.caption(
-        f"Year to date: Revenue {money(ytd['operating_revenue'].sum())} · NOI {money(ytd['noi'].sum())} · "
-        f"Cash flow {money(ytd['cash_flow_after_debt'].sum())} | Trailing 12 months: "
-        f"Revenue {money(trailing['operating_revenue'].sum())} · NOI {money(trailing['noi'].sum())} · "
-        f"Cash flow {money(trailing['cash_flow_after_debt'].sum())}"
-    )
-    monthly = metrics.groupby("period", as_index=False)[
-        ["operating_revenue", "operating_expenses", "noi", "cash_flow_after_debt"]
-    ].sum()
-    st.plotly_chart(
-        px.line(
-            monthly,
-            x="period",
-            y=[
-                "operating_revenue",
-                "operating_expenses",
-                "noi",
-                "cash_flow_after_debt",
-            ],
-            markers=True,
-            title="Monthly portfolio performance",
-        ),
+            "Property",
+            "Result",
+            "Cash profit / loss",
+            "Income",
+            "Operating costs",
+            "Mortgage payments",
+            "Capital improvements",
+            "Setup",
+        ]
+    ].sort_values("Cash profit / loss", ascending=False)
+    st.subheader("Profit or loss by property")
+    st.dataframe(
+        investor_table,
         width="stretch",
+        hide_index=True,
+        column_config={
+            column: st.column_config.NumberColumn(column, format="$%.2f")
+            for column in [
+                "Cash profit / loss",
+                "Income",
+                "Operating costs",
+                "Mortgage payments",
+                "Capital improvements",
+            ]
+        },
     )
-    by_property = metrics.groupby("property_name", as_index=False)[
-        ["noi", "cash_flow_after_debt"]
-    ].sum()
     st.plotly_chart(
         px.bar(
-            by_property,
-            x="property_name",
-            y=["noi", "cash_flow_after_debt"],
-            barmode="group",
-            title="Property contribution",
+            investor_table,
+            x="Property",
+            y="Cash profit / loss",
+            color="Result",
+            color_discrete_map={
+                "Profit": "#2e8b57",
+                "Loss": "#c0392b",
+                "Break-even": "#7f8c8d",
+            },
+            title="Cash profit or loss by property",
         ),
         width="stretch",
     )
+    with st.expander("How this cash profit/loss is calculated"):
+        st.markdown(
+            """
+            **Cash profit/loss = rent and other income − operating costs − mortgage
+            principal and interest − capital improvements.**
+
+            Owner contributions and distributions are transfers and are excluded.
+            Mortgage principal reduces cash profit but builds equity. Capital
+            improvements reduce cash in the period but do not reduce NOI. This is a
+            cash-investment view, not taxable income.
+            """
+        )
 
 
 def performance(unit_level: bool = False) -> None:
@@ -194,36 +270,104 @@ def performance(unit_level: bool = False) -> None:
     selected = st.selectbox(
         "Property", options, format_func=lambda value: options[value]
     )
+    scope = st.segmented_control(
+        "Time period",
+        ["Latest month", "Year to date", "Trailing 12 months", "All time"],
+        default="Trailing 12 months",
+        key="property_scope",
+    )
     data = metrics[metrics["property_id"].astype(str) == str(selected)].copy()
     if data.empty:
         st.info("No financial activity has been recorded for this property.")
         return
+    summary, period_label = summarize_cash_performance(
+        data, properties, store.read("Loans"), scope or "Trailing 12 months"
+    )
+    result = summary.iloc[0]
+    cash_result = float(result["cash_flow_after_debt"])
+    st.subheader(f"{result['result']}: {money(abs(cash_result))} · {period_label}")
+    if result["setup_status"] != "Complete":
+        st.warning(
+            f"Preliminary result — {result['setup_note']}. Complete Property Setup before relying on this result."
+        )
+    income = float(result["operating_revenue"])
+    operating = float(result["operating_expenses"])
+    mortgage = float(result["debt_service"])
+    capex = float(result["capex"])
+    cols = st.columns(5)
+    cols[0].metric("Income", money(income))
+    cols[1].metric("Operating costs", money(operating))
+    cols[2].metric("Mortgage payments", money(mortgage))
+    cols[3].metric("Improvements", money(capex))
+    cols[4].metric("Cash profit / loss", money(cash_result))
     numeric = [
         "operating_revenue",
         "operating_expenses",
-        "noi",
+        "debt_service",
         "capex",
         "cash_flow_after_debt",
     ]
     data[numeric] = data[numeric].apply(pd.to_numeric, errors="coerce").fillna(0)
+    friendly = data.rename(
+        columns={
+            "period": "Month",
+            "operating_revenue": "Income",
+            "operating_expenses": "Operating costs",
+            "debt_service": "Mortgage payments",
+            "capex": "Capital improvements",
+            "cash_flow_after_debt": "Cash profit / loss",
+        }
+    )
     st.plotly_chart(
-        px.line(data, x="period", y=numeric, markers=True, title=options[selected]),
+        px.bar(
+            friendly,
+            x="Month",
+            y=[
+                "Income",
+                "Operating costs",
+                "Mortgage payments",
+                "Capital improvements",
+                "Cash profit / loss",
+            ],
+            barmode="group",
+            title=f"Monthly cash performance — {options[selected]}",
+        ),
         width="stretch",
     )
-    display = [
-        "period",
-        *numeric,
-        "collection_rate",
-        "expense_ratio",
-        "dscr",
-        "cap_rate_purchase",
-        "cap_rate_current",
-        "cash_on_cash",
-        "estimated_equity",
-        "ltv",
-        "return_on_equity",
-    ]
-    st.dataframe(data.reindex(columns=display), width="stretch", hide_index=True)
+    with st.expander("Advanced investor metrics"):
+        latest = data.sort_values("period").iloc[-1]
+        advanced = pd.DataFrame(
+            [
+                [
+                    "NOI",
+                    latest.get("noi"),
+                    "Income minus operating costs, before mortgage and improvements",
+                ],
+                ["DSCR", latest.get("dscr"), "NOI divided by mortgage payments"],
+                [
+                    "Cap rate on purchase",
+                    latest.get("cap_rate_purchase"),
+                    "Annualized NOI divided by purchase price",
+                ],
+                [
+                    "Cash-on-cash return",
+                    latest.get("cash_on_cash"),
+                    "Annualized cash result divided by cash invested",
+                ],
+                [
+                    "Estimated equity",
+                    latest.get("estimated_equity"),
+                    "Current value minus estimated loan balance",
+                ],
+                [
+                    "Loan-to-value",
+                    latest.get("ltv"),
+                    "Estimated loan balance divided by current value",
+                ],
+            ],
+            columns=["Metric", "Value", "Meaning"],
+        )
+        st.dataframe(advanced, width="stretch", hide_index=True)
 
 
 def income_and_expenses() -> None:
@@ -403,87 +547,219 @@ def import_statements() -> None:
 
 
 def manage_properties() -> None:
-    st.title("Properties, Units, Loans, and Values")
+    st.title("Property Setup")
+    st.caption(
+        "Tell us how each property was purchased so profit/loss includes the mortgage correctly."
+    )
     tab_property, tab_unit, tab_loan, tab_value = st.tabs(
-        ["Properties", "Units", "Loans", "Valuations"]
+        ["Property setup", "Units", "Advanced loan details", "Property values"]
     )
     properties = store.read("Properties")
     with tab_property:
-        st.caption(
-            "Edit imported property names and add acquisition, valuation, tax, insurance, and expected-rent details directly below."
-        )
-        edited_properties = st.data_editor(
-            properties,
-            width="stretch",
-            hide_index=True,
-            disabled=["property_id"],
-            key="property_editor",
-        )
-        if st.button("Save property changes"):
-            store.update({"Properties": edited_properties})
-            manager.refresh_metrics()
-            st.success("Property details saved.")
-            st.rerun()
-        st.subheader("Add another property")
-        with st.form("property_form"):
-            name = st.text_input("Property name*")
-            address = st.text_input("Address")
-            kind = st.selectbox(
-                "Type", ["Single-family", "Duplex", "Fourplex", "Other"]
+        property_choices = {"__new__": "Add a new property"}
+        if not properties.empty:
+            property_choices.update(
+                properties.set_index("property_id")["name"].astype(str).to_dict()
             )
-            purchase_date = st.date_input("Purchase date")
-            numeric_names = [
+        selected_property = st.selectbox(
+            "Which property do you want to set up?",
+            property_choices,
+            format_func=lambda value: property_choices[value],
+        )
+        existing = (
+            properties[properties["property_id"].astype(str) == str(selected_property)]
+            .iloc[0]
+            .to_dict()
+            if selected_property != "__new__"
+            else {}
+        )
+        loans = store.read("Loans")
+        existing_loans = (
+            loans[loans["property_id"].astype(str) == str(selected_property)]
+            if selected_property != "__new__"
+            else pd.DataFrame()
+        )
+        existing_loan = (
+            existing_loans.iloc[0].to_dict() if not existing_loans.empty else {}
+        )
+        financing_default = str(existing.get("financing_type") or "")
+        if financing_default not in {"Cash purchase", "Mortgage"}:
+            financing_default = "Mortgage" if existing_loan else "Choose one"
+        with st.form(f"property_setup_{selected_property}"):
+            st.subheader("1. Property")
+            name = st.text_input(
+                "Property name*", value=str(existing.get("name") or "")
+            )
+            address = st.text_input("Address", value=str(existing.get("address") or ""))
+            property_types = ["Single-family", "Duplex", "Fourplex", "Other"]
+            existing_type = str(existing.get("property_type") or "Single-family")
+            kind = st.selectbox(
+                "Property type",
+                property_types,
+                index=property_types.index(existing_type)
+                if existing_type in property_types
+                else 0,
+            )
+            purchase_date = st.date_input(
+                "Purchase date", value=ui_date(existing.get("purchase_date"))
+            )
+            purchase_col, value_col, rent_col = st.columns(3)
+            purchase_price = purchase_col.number_input(
                 "Purchase price",
-                "Closing costs",
-                "Initial renovations",
-                "Down payment",
-                "Other initial capital",
-                "Current value",
-                "Annual taxes",
-                "Annual insurance",
-                "Annual HOA",
+                min_value=0.0,
+                value=ui_number(existing.get("purchase_price")),
+                step=1000.0,
+            )
+            current_value = value_col.number_input(
+                "Current estimated value",
+                min_value=0.0,
+                value=ui_number(existing.get("current_value")),
+                step=1000.0,
+            )
+            expected_rent = rent_col.number_input(
                 "Expected monthly rent",
-            ]
-            values = {
-                label: st.number_input(label, min_value=0.0, step=100.0)
-                for label in numeric_names
-            }
-            notes = st.text_area("Notes")
-            if st.form_submit_button("Add property", type="primary"):
-                if not name:
-                    st.error("Property name is required.")
-                else:
-                    row = {
-                        "property_id": f"prop_{uuid.uuid4().hex[:10]}",
-                        "name": name,
-                        "address": address,
-                        "property_type": kind,
-                        "purchase_date": purchase_date.isoformat(),
-                        "notes": notes,
+                min_value=0.0,
+                value=ui_number(existing.get("expected_monthly_rent")),
+                step=100.0,
+            )
+            st.subheader("2. Your cash invested")
+            cash_col1, cash_col2, cash_col3, cash_col4 = st.columns(4)
+            down_payment = cash_col1.number_input(
+                "Down payment",
+                min_value=0.0,
+                value=ui_number(existing.get("down_payment")),
+            )
+            closing_costs = cash_col2.number_input(
+                "Closing costs",
+                min_value=0.0,
+                value=ui_number(existing.get("closing_costs")),
+            )
+            renovations = cash_col3.number_input(
+                "Initial renovations",
+                min_value=0.0,
+                value=ui_number(existing.get("initial_renovations")),
+            )
+            other_capital = cash_col4.number_input(
+                "Other initial cash",
+                min_value=0.0,
+                value=ui_number(existing.get("other_initial_capital")),
+            )
+            st.subheader("3. Financing")
+            financing_options = ["Choose one", "Cash purchase", "Mortgage"]
+            financing = st.selectbox(
+                "How was this property purchased?*",
+                financing_options,
+                index=financing_options.index(financing_default),
+                help="Mortgage details are required to calculate your true cash profit or loss.",
+            )
+            st.markdown("**Complete these fields when Mortgage is selected:**")
+            loan_col1, loan_col2, loan_col3 = st.columns(3)
+            principal = loan_col1.number_input(
+                "Original mortgage amount",
+                min_value=0.0,
+                value=ui_number(existing_loan.get("original_principal")),
+                step=1000.0,
+            )
+            rate = loan_col2.number_input(
+                "Interest rate (%)",
+                min_value=0.0,
+                max_value=30.0,
+                value=ui_number(existing_loan.get("interest_rate")),
+                step=0.125,
+                help="Enter 6.5 for a 6.5% mortgage rate.",
+            )
+            amortization = loan_col3.number_input(
+                "Amortization period (years)",
+                min_value=1,
+                max_value=50,
+                value=int(ui_number(existing_loan.get("amortization_years")) or 30),
+            )
+            loan_col4, loan_col5, loan_col6 = st.columns(3)
+            loan_start = loan_col4.date_input(
+                "Mortgage start date",
+                value=ui_date(
+                    existing_loan.get("origination_date")
+                    or existing.get("purchase_date")
+                ),
+            )
+            payment = loan_col5.number_input(
+                "Monthly principal + interest",
+                min_value=0.0,
+                value=ui_number(existing_loan.get("monthly_payment")),
+                help="Leave at 0 and the dashboard will calculate it from the loan amount, rate, and term.",
+            )
+            current_balance = loan_col6.number_input(
+                "Current mortgage balance",
+                min_value=0.0,
+                value=ui_number(existing_loan.get("current_balance")),
+            )
+            balance_date = st.date_input(
+                "Balance as of",
+                value=ui_date(existing_loan.get("balance_as_of")),
+            )
+            with st.expander("Optional annual property information"):
+                annual_col1, annual_col2, annual_col3 = st.columns(3)
+                annual_taxes = annual_col1.number_input(
+                    "Annual property taxes",
+                    min_value=0.0,
+                    value=ui_number(existing.get("annual_taxes")),
+                )
+                annual_insurance = annual_col2.number_input(
+                    "Annual insurance",
+                    min_value=0.0,
+                    value=ui_number(existing.get("annual_insurance")),
+                )
+                annual_hoa = annual_col3.number_input(
+                    "Annual HOA",
+                    min_value=0.0,
+                    value=ui_number(existing.get("annual_hoa")),
+                )
+                st.caption(
+                    "These are reference values. Record actual owner-paid tax, insurance, and HOA payments under Owner-Paid Expenses for cash profit/loss."
+                )
+            notes = st.text_area("Notes", value=str(existing.get("notes") or ""))
+            if st.form_submit_button("Save property setup", type="primary"):
+                property_record = {
+                    "property_id": ""
+                    if selected_property == "__new__"
+                    else selected_property,
+                    "name": name,
+                    "address": address,
+                    "property_type": kind,
+                    "financing_type": financing,
+                    "purchase_date": purchase_date.isoformat(),
+                    "purchase_price": purchase_price,
+                    "closing_costs": closing_costs,
+                    "initial_renovations": renovations,
+                    "down_payment": down_payment,
+                    "other_initial_capital": other_capital,
+                    "current_value": current_value,
+                    "annual_taxes": annual_taxes,
+                    "annual_insurance": annual_insurance,
+                    "annual_hoa": annual_hoa,
+                    "expected_monthly_rent": expected_rent,
+                    "notes": notes,
+                }
+                loan_record = (
+                    {
+                        "original_principal": principal,
+                        "origination_date": loan_start.isoformat(),
+                        "interest_rate": rate,
+                        "term_years": amortization,
+                        "amortization_years": amortization,
+                        "monthly_payment": payment,
+                        "current_balance": current_balance,
+                        "balance_as_of": balance_date.isoformat(),
                     }
-                    keys = [
-                        "purchase_price",
-                        "closing_costs",
-                        "initial_renovations",
-                        "down_payment",
-                        "other_initial_capital",
-                        "current_value",
-                        "annual_taxes",
-                        "annual_insurance",
-                        "annual_hoa",
-                        "expected_monthly_rent",
-                    ]
-                    row.update(dict(zip(keys, values.values())))
-                    store.update(
-                        {
-                            "Properties": pd.concat(
-                                [properties, pd.DataFrame([row])], ignore_index=True
-                            )
-                        }
-                    )
-                    manager.refresh_metrics()
-                    st.success("Property added.")
+                    if financing == "Mortgage"
+                    else None
+                )
+                try:
+                    manager.save_property_setup(property_record, loan_record)
+                    st.success("Property and mortgage details saved.")
                     st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
     prop_options = (
         properties.set_index("property_id")["name"].to_dict()
         if not properties.empty
@@ -745,19 +1021,19 @@ def review() -> None:
 page = st.sidebar.radio(
     "Navigate",
     [
-        "Portfolio Overview",
+        "Investor Summary",
         "Property Performance",
         "Unit Performance",
         "Income & Expenses",
         "Debt & Equity",
         "Statements and Imports",
-        "Properties, Units, Loans & Values",
+        "Property Setup",
         "Owner-Paid Expenses",
         "Import Review",
         "Data & Settings",
     ],
 )
-if page == "Portfolio Overview":
+if page == "Investor Summary":
     portfolio_overview()
 elif page == "Property Performance":
     performance()
@@ -769,7 +1045,7 @@ elif page == "Debt & Equity":
     debt_and_equity()
 elif page == "Statements and Imports":
     import_statements()
-elif page == "Properties, Units, Loans & Values":
+elif page == "Property Setup":
     manage_properties()
 elif page == "Owner-Paid Expenses":
     external_expenses()

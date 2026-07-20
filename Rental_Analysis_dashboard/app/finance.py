@@ -66,6 +66,15 @@ def _number(value) -> float:
         return 0.0
 
 
+def _missing(value) -> bool:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def calculate_monthly_metrics(
     transactions: pd.DataFrame,
     external: pd.DataFrame,
@@ -191,8 +200,11 @@ def calculate_monthly_metrics(
             principal += p
             debt += d
             balance += b
+        if row["mortgage_interest"]:
+            interest = row["mortgage_interest"]
+        if row["mortgage_principal"]:
+            principal = row["mortgage_principal"]
         if row["mortgage_interest"] or row["mortgage_principal"]:
-            interest, principal = row["mortgage_interest"], row["mortgage_principal"]
             debt = interest + principal
         revenue = row["rental_income"] + row["other_income"]
         noi = revenue - row["operating_expenses"]
@@ -250,3 +262,129 @@ def calculate_monthly_metrics(
             }
         )
     return pd.DataFrame(result)
+
+
+def summarize_cash_performance(
+    metrics: pd.DataFrame,
+    properties: pd.DataFrame,
+    loans: pd.DataFrame,
+    period_scope: str = "Trailing 12 months",
+) -> tuple[pd.DataFrame, str]:
+    """Return investor-friendly cash results and their reporting-period label.
+
+    Cash profit/loss is spendable cash: operating revenue minus operating expenses,
+    principal, interest, and capital improvements. It differs from taxable profit
+    and from NOI.
+    """
+    columns = [
+        "property_id",
+        "property_name",
+        "rental_income",
+        "other_income",
+        "operating_revenue",
+        "operating_expenses",
+        "noi",
+        "mortgage_interest",
+        "mortgage_principal",
+        "debt_service",
+        "capex",
+        "cash_flow_after_debt",
+        "months",
+        "result",
+        "setup_status",
+        "setup_note",
+    ]
+    if metrics.empty:
+        return pd.DataFrame(columns=columns), "No activity"
+    data = metrics.copy()
+    data["period_date"] = pd.to_datetime(
+        data["period"].astype(str) + "-01", errors="coerce"
+    )
+    data = data.dropna(subset=["period_date"])
+    if data.empty:
+        return pd.DataFrame(columns=columns), "No valid periods"
+    latest = data["period_date"].max()
+    if period_scope == "Latest month":
+        data = data[data["period_date"] == latest]
+        label = latest.strftime("%B %Y")
+    elif period_scope == "Year to date":
+        data = data[data["period_date"].dt.year == latest.year]
+        label = f"January–{latest.strftime('%B %Y')}"
+    elif period_scope == "All time":
+        label = (
+            f"{data['period_date'].min().strftime('%B %Y')}–{latest.strftime('%B %Y')}"
+        )
+    else:
+        data = data[data["period_date"] >= latest - pd.DateOffset(months=11)]
+        label = f"Trailing 12 months through {latest.strftime('%B %Y')}"
+    number_columns = [
+        "rental_income",
+        "other_income",
+        "operating_revenue",
+        "operating_expenses",
+        "noi",
+        "mortgage_interest",
+        "mortgage_principal",
+        "debt_service",
+        "capex",
+        "cash_flow_after_debt",
+    ]
+    for column in number_columns:
+        data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0)
+    summary = data.groupby(["property_id", "property_name"], as_index=False)[
+        number_columns
+    ].sum()
+    month_counts = data.groupby("property_id")["period"].nunique().to_dict()
+    property_rows = (
+        properties.set_index("property_id").to_dict("index")
+        if not properties.empty
+        else {}
+    )
+    loan_rows = (
+        {key: group.to_dict("records") for key, group in loans.groupby("property_id")}
+        if not loans.empty
+        else {}
+    )
+    statuses, notes, results, months = [], [], [], []
+    for row in summary.to_dict("records"):
+        prop_id = row["property_id"]
+        prop = property_rows.get(prop_id, {})
+        financing = str(prop.get("financing_type") or "").strip()
+        property_loans = loan_rows.get(prop_id, [])
+        if financing == "Cash purchase":
+            status, note = "Complete", "Cash purchase"
+        elif financing == "Mortgage":
+            loan = property_loans[0] if property_loans else {}
+            missing = []
+            if _number(loan.get("original_principal")) <= 0:
+                missing.append("loan amount")
+            rate_value = loan.get("interest_rate")
+            if _missing(rate_value):
+                missing.append("interest rate")
+            start_value = loan.get("origination_date")
+            if _missing(start_value):
+                missing.append("loan start date")
+            if _number(loan.get("amortization_years") or loan.get("term_years")) <= 0:
+                missing.append("loan term")
+            status = "Complete" if not missing else "Setup needed"
+            note = (
+                "Mortgage included" if not missing else "Missing " + ", ".join(missing)
+            )
+        else:
+            status, note = "Setup needed", "Choose cash purchase or mortgage"
+        cash_result = _number(row["cash_flow_after_debt"])
+        results.append(
+            "Profit"
+            if cash_result > 0.005
+            else "Loss"
+            if cash_result < -0.005
+            else "Break-even"
+        )
+        statuses.append(status)
+        notes.append(note)
+        months.append(month_counts.get(prop_id, 0))
+    summary["months"] = months
+    summary["result"] = results
+    summary["setup_status"] = statuses
+    summary["setup_note"] = notes
+    return summary.reindex(columns=columns), label

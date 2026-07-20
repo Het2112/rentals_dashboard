@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .finance import calculate_monthly_metrics
+from .finance import calculate_monthly_metrics, monthly_payment
 from .parser import AppFolioParser, PARSER_VERSION, ParsedStatement
 from .schema import FINANCIAL_CLASSIFICATIONS
 from .workbook import WorkbookStore
@@ -348,6 +348,76 @@ class PortfolioManager:
             self.refresh_metrics()
         return len(accepted), duplicates
 
+    def save_property_setup(
+        self, property_record: dict, loan_record: dict | None
+    ) -> str:
+        """Create or update a property and its primary mortgage together."""
+        properties = self.store.read("Properties")
+        loans = self.store.read("Loans")
+        property_id = str(property_record.get("property_id") or _id("prop"))
+        name = str(property_record.get("name") or "").strip()
+        financing = str(property_record.get("financing_type") or "").strip()
+        if not name:
+            raise ValueError("Property name is required")
+        if financing not in {"Cash purchase", "Mortgage"}:
+            raise ValueError(
+                "Choose whether the property was purchased with cash or a mortgage"
+            )
+        property_record = {
+            **property_record,
+            "property_id": property_id,
+            "name": name,
+        }
+        existing = properties["property_id"].astype(str) == property_id
+        if existing.any():
+            for key, value in property_record.items():
+                if key in properties.columns:
+                    properties.loc[existing, key] = value
+        else:
+            properties = pd.concat(
+                [properties, pd.DataFrame([property_record])], ignore_index=True
+            )
+        property_loans = loans["property_id"].astype(str) == property_id
+        if financing == "Cash purchase":
+            loans = loans[~property_loans]
+        else:
+            loan_record = dict(loan_record or {})
+            principal = _safe_float(loan_record.get("original_principal"))
+            years = _safe_float(
+                loan_record.get("amortization_years") or loan_record.get("term_years")
+            )
+            rate_value = loan_record.get("interest_rate")
+            if principal <= 0:
+                raise ValueError("Mortgage amount must be greater than zero")
+            if _is_missing(rate_value):
+                raise ValueError("Mortgage interest rate is required")
+            if _is_missing(loan_record.get("origination_date")):
+                raise ValueError("Mortgage start date is required")
+            if years <= 0:
+                raise ValueError("Mortgage term must be greater than zero")
+            payment = _safe_float(loan_record.get("monthly_payment"))
+            if payment <= 0:
+                payment = monthly_payment(principal, _safe_float(rate_value), years)
+            existing_loan = (
+                loans.loc[property_loans].iloc[0].to_dict()
+                if property_loans.any()
+                else {}
+            )
+            completed_loan = {
+                **existing_loan,
+                **loan_record,
+                "loan_id": existing_loan.get("loan_id") or _id("loan"),
+                "property_id": property_id,
+                "monthly_payment": payment,
+            }
+            loans = loans[~property_loans]
+            loans = pd.concat(
+                [loans, pd.DataFrame([completed_loan])], ignore_index=True
+            )
+        self.store.update({"Properties": properties, "Loans": loans})
+        self.refresh_metrics()
+        return property_id
+
     def refresh_metrics(self) -> pd.DataFrame:
         metrics = calculate_monthly_metrics(
             self.store.read("Transactions"),
@@ -395,3 +465,19 @@ class PortfolioManager:
                 )
             }
         )
+
+
+def _safe_float(value) -> float:
+    try:
+        return 0.0 if pd.isna(value) else float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_missing(value) -> bool:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False

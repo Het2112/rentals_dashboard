@@ -6,6 +6,7 @@ SHEETS = {
         "name",
         "address",
         "property_type",
+        "financing_type",
         "purchase_date",
         "purchase_price",
         "closing_costs",

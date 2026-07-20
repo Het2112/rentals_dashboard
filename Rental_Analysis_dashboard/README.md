@@ -13,6 +13,8 @@ A private, local Streamlit application for importing AppFolio owner-statement PD
 - Separates maintenance/operating expenses from capital improvements, debt, and owner transfers.
 - Calculates monthly property and portfolio metrics and creates Streamlit and Excel charts.
 - Supports properties, units, manually entered valuations, and amortized loans.
+- Opens with a plain-language investor summary showing cash profit or loss overall and by property.
+- Captures mortgage amount, interest rate, term, payment, and current balance during property setup.
 
 ## Financial treatment
 
@@ -22,6 +24,18 @@ A private, local Streamlit application for importing AppFolio owner-statement PD
 - **Mortgage principal and interest** are excluded from NOI and included in after-debt cash flow.
 - **Owner contributions and distributions** are transfers, not revenue or expenses.
 - **Capital gain** applies when an asset is sold; it is not used as a repair classification.
+
+The headline result is **cash profit/loss**:
+
+```text
+rent and other income
+− operating expenses
+− mortgage principal and interest
+− capital improvements
+= cash profit or loss
+```
+
+Mortgage principal reduces current cash but builds equity, so it is also shown separately. Unrealized appreciation is not included in cash profit. A property remains marked **Setup needed** until the user confirms cash purchase or supplies its mortgage details; incomplete properties are never presented as finalized results.
 
 The dashboard is an investment-analysis tool, not tax or accounting advice.
 
@@ -60,7 +74,7 @@ Streamlit prints a private local URL, normally `http://localhost:8501`.
 3. Select **Analyze statements**.
 4. Review the detected periods, properties, totals, and warnings.
 5. Import new statements or explicitly approve revisions.
-6. Open **Properties, Units, Loans & Values** and complete the automatically discovered property records.
+6. Open **Property Setup**, select every automatically discovered property, and confirm whether it was a cash purchase or mortgage. For a mortgage, enter its amount, interest rate, start date, amortization period, payment, and current balance.
 7. Add the nine units and loan/valuation information.
 8. Record expenses paid outside AppFolio under **Owner-Paid Expenses**.
 

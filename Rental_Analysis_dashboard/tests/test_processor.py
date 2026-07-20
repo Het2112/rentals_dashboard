@@ -77,3 +77,29 @@ def test_external_expense_deduplication_and_classification(tmp_path):
     invalid = {**record, "description": "", "amount": 1}
     with pytest.raises(ValueError, match="description"):
         manager.add_external_expenses([invalid])
+
+
+def test_property_setup_saves_interest_and_calculated_payment(tmp_path):
+    manager = PortfolioManager(tmp_path / "Rental_Portfolio.xlsx")
+    property_id = manager.save_property_setup(
+        {
+            "name": "Investor Rental",
+            "financing_type": "Mortgage",
+            "purchase_price": 300000,
+            "down_payment": 60000,
+        },
+        {
+            "original_principal": 240000,
+            "origination_date": "2026-01-01",
+            "interest_rate": 6.5,
+            "amortization_years": 30,
+            "term_years": 30,
+            "monthly_payment": 0,
+        },
+    )
+    saved_property = manager.store.read("Properties").iloc[0]
+    saved_loan = manager.store.read("Loans").iloc[0]
+    assert saved_property["property_id"] == property_id
+    assert saved_property["financing_type"] == "Mortgage"
+    assert float(saved_loan["interest_rate"]) == 6.5
+    assert float(saved_loan["monthly_payment"]) == pytest.approx(1516.96, abs=0.02)
