@@ -28,6 +28,19 @@ def test_amortization_calculates_principal_and_interest():
     assert balance == pytest.approx(239761.08, abs=0.02)
 
 
+def test_incomplete_loan_never_propagates_nan():
+    interest, principal, debt, balance = loan_month(
+        {
+            "original_principal": float("nan"),
+            "origination_date": "2025-01-01",
+            "interest_rate": 7.5,
+            "amortization_years": float("nan"),
+        },
+        pd.Period("2026-01", freq="M"),
+    )
+    assert (interest, principal, debt, balance) == (0.0, 0.0, 0.0, 0.0)
+
+
 def test_metrics_keep_noi_capex_debt_and_transfers_separate():
     tx = pd.DataFrame(
         [
@@ -84,8 +97,11 @@ def test_metrics_keep_noi_capex_debt_and_transfers_separate():
     ).iloc[0]
     assert metrics.operating_revenue == 2000
     assert metrics.operating_expenses == 200
+    assert metrics.maintenance == 200
     assert metrics.noi == 1800
     assert metrics.capex == 500
+    assert metrics.maintenance_pct_rent == pytest.approx(0.1)
+    assert metrics.capex_pct_rent == pytest.approx(0.25)
     assert metrics.cash_flow_after_debt == 1300
     assert metrics.cap_rate_purchase == pytest.approx(0.108)
     assert metrics.collection_rate == 1
@@ -247,3 +263,88 @@ def test_actual_interest_does_not_erase_scheduled_principal():
     assert month.mortgage_interest == 1100
     assert month.mortgage_principal == pytest.approx(238.92, abs=0.02)
     assert month.debt_service == pytest.approx(1338.92, abs=0.02)
+
+
+def test_since_purchase_uses_baseline_once_and_adds_only_later_activity():
+    metrics = pd.DataFrame(
+        [
+            {
+                "period": "2025-06",
+                "property_id": "p1",
+                "property_name": "Rental",
+                "rental_income": 500,
+                "other_income": 0,
+                "operating_revenue": 500,
+                "operating_expenses": 100,
+                "noi": 400,
+                "mortgage_interest": 0,
+                "mortgage_principal": 0,
+                "debt_service": 0,
+                "capex": 0,
+                "cash_flow_after_debt": 400,
+            },
+            {
+                "period": "2026-06",
+                "property_id": "p1",
+                "property_name": "Rental",
+                "rental_income": 200,
+                "other_income": 0,
+                "operating_revenue": 200,
+                "operating_expenses": 100,
+                "noi": 100,
+                "mortgage_interest": 0,
+                "mortgage_principal": 0,
+                "debt_service": 0,
+                "capex": 0,
+                "cash_flow_after_debt": 100,
+            },
+        ]
+    )
+    properties = pd.DataFrame(
+        [
+            {
+                "property_id": "p1",
+                "name": "Rental",
+                "financing_type": "Cash purchase",
+                "purchase_date": "2025-01-01",
+            }
+        ]
+    )
+    baselines = pd.DataFrame(
+        [
+            {
+                "property_id": "p1",
+                "property_key": "rental",
+                "as_of_date": "2025-06-30",
+                "total_rent": 1000,
+                "management_fees": 100,
+                "maintenance": 200,
+                "renovations": 100,
+                "utility_deficit": 0,
+                "mortgage_principal": 0,
+                "mortgage_interest": 0,
+                "total_debt_tax_insurance": 1600,
+                "cash_profit_loss": -1000,
+            }
+        ]
+    )
+    statements = pd.DataFrame(
+        [
+            {
+                "period_end": "2026-06-30",
+                "status": "active",
+            }
+        ]
+    )
+    summary, label = summarize_cash_performance(
+        metrics,
+        properties,
+        pd.DataFrame(),
+        "Since purchase",
+        baselines,
+        statements,
+    )
+    assert label == "Since purchase through June 2026"
+    assert summary.iloc[0].cash_flow_after_debt == -900
+    assert summary.iloc[0].setup_status == "Data incomplete"
+    assert "missing 11 monthly statement" in summary.iloc[0].setup_note

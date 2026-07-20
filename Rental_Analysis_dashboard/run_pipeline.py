@@ -23,6 +23,11 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(__file__).resolve().parent
     manager = PortfolioManager(root / "data" / "Rental_Portfolio.xlsx")
+    manager.apply_historical_seed(root / "data" / "historical_seed_june_2025.json")
+    manager.apply_statement_history_seed(
+        root / "data" / "statement_history_through_2026_06.json"
+    )
+    manager.refresh_for_calculation_version("4.0.0")
     pdfs = []
     for path in args.paths:
         pdfs.extend(sorted(path.glob("*.pdf")) if path.is_dir() else [path])

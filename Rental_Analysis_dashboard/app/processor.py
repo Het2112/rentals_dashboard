@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import uuid
@@ -30,6 +31,463 @@ class PortfolioManager:
         self.store = WorkbookStore(Path(excel_path))
         self.statement_dir = self.store.path.parent / "statements"
         self.statement_dir.mkdir(parents=True, exist_ok=True)
+
+    def apply_historical_seed(self, seed_path: Path) -> dict:
+        """Idempotently preload owner-provided cumulative property baselines."""
+        seed_path = Path(seed_path)
+        if not seed_path.exists():
+            return {"added": 0, "updated_properties": 0}
+        seed = json.loads(seed_path.read_text(encoding="utf-8"))
+        as_of_date = seed["as_of_date"]
+        properties = self.store.read("Properties")
+        loans = self.store.read("Loans")
+        baselines = self.store.read("Historical_Baselines")
+        added = updated = 0
+        baseline_changed = False
+        for item in seed["properties"]:
+            calculated = round(
+                _safe_float(item["total_rent"])
+                - _safe_float(item["management_fees"])
+                - _safe_float(item["maintenance"])
+                - _safe_float(item["renovations"])
+                - _safe_float(item["utility_deficit"])
+                - _safe_float(item["total_debt_tax_insurance"]),
+                2,
+            )
+            if abs(calculated - _safe_float(item["cash_profit_loss"])) > 0.02:
+                raise ValueError(
+                    f"Historical seed does not reconcile for {item['display_name']}"
+                )
+            terms = [_normalized(term) for term in item.get("match_terms", [])]
+            match_index = None
+            for index, prop in properties.iterrows():
+                searchable = _normalized(
+                    f"{prop.get('name', '')} {prop.get('address', '')}"
+                )
+                if any(term and term in searchable for term in terms):
+                    match_index = index
+                    break
+            if match_index is None:
+                property_id = f"prop_{item['property_key']}"
+                properties = pd.concat(
+                    [
+                        properties,
+                        pd.DataFrame(
+                            [
+                                {
+                                    "property_id": property_id,
+                                    "name": item["display_name"],
+                                    "property_type": item["property_type"],
+                                }
+                            ]
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+                match_index = properties.index[-1]
+            property_id = str(properties.at[match_index, "property_id"])
+            seeded_fields = {
+                "purchase_date": item["purchase_date"],
+                "purchase_price": item["purchase_price"],
+                "closing_costs": item["closing_costs"],
+                "down_payment": item["down_payment"],
+                "initial_renovations": item["renovations"],
+                "property_type": item["property_type"],
+                "financing_type": "Mortgage",
+            }
+            property_changed = False
+            for field, value in seeded_fields.items():
+                current = properties.at[match_index, field]
+                if _is_missing(current) or (
+                    field == "property_type" and current == "Needs review"
+                ):
+                    properties.at[match_index, field] = value
+                    property_changed = True
+            updated += int(property_changed)
+            property_loans = loans["property_id"].astype(str) == property_id
+            if property_loans.any():
+                loan_index = loans[property_loans].index[0]
+                if _is_missing(loans.at[loan_index, "interest_rate"]):
+                    loans.at[loan_index, "interest_rate"] = item["interest_rate"]
+                if _is_missing(loans.at[loan_index, "origination_date"]):
+                    loans.at[loan_index, "origination_date"] = item["purchase_date"]
+            else:
+                loans = pd.concat(
+                    [
+                        loans,
+                        pd.DataFrame(
+                            [
+                                {
+                                    "loan_id": _id("loan"),
+                                    "property_id": property_id,
+                                    "origination_date": item["purchase_date"],
+                                    "interest_rate": item["interest_rate"],
+                                    "notes": "Interest rate seeded from June 2025 owner data; loan amount, term, payment, and balance still require confirmation.",
+                                }
+                            ]
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+            baseline_id = f"baseline_{item['property_key']}_{as_of_date}"
+            if baseline_id not in set(baselines["baseline_id"].dropna().astype(str)):
+                baselines = pd.concat(
+                    [
+                        baselines,
+                        pd.DataFrame(
+                            [
+                                {
+                                    "baseline_id": baseline_id,
+                                    "property_id": property_id,
+                                    "property_key": item["property_key"],
+                                    "as_of_date": as_of_date,
+                                    "statement_coverage_start": item.get(
+                                        "statement_coverage_start",
+                                        item["purchase_date"],
+                                    ),
+                                    "total_rent": item["total_rent"],
+                                    "management_fees": item["management_fees"],
+                                    "maintenance": item["maintenance"],
+                                    "statement_maintenance": item["maintenance"]
+                                    - item["owner_paid_maintenance_estimate"],
+                                    "statement_capex": item["renovations"],
+                                    "adjusted_maintenance": item["maintenance"],
+                                    "adjusted_capex": item["renovations"],
+                                    "owner_paid_maintenance": item[
+                                        "owner_paid_maintenance_estimate"
+                                    ],
+                                    "reconciliation_status": "Estimated from owner notes; pending historical statements",
+                                    "renovations": item["renovations"],
+                                    "utility_deficit": item["utility_deficit"],
+                                    "mortgage_principal": item["mortgage_principal"],
+                                    "mortgage_interest": item["mortgage_interest"],
+                                    "tax_insurance_escrow": item[
+                                        "tax_insurance_escrow"
+                                    ],
+                                    "total_debt_tax_insurance": item[
+                                        "total_debt_tax_insurance"
+                                    ],
+                                    "cash_profit_loss": item["cash_profit_loss"],
+                                    "adjusted_cash_profit_loss": item[
+                                        "cash_profit_loss"
+                                    ],
+                                    "notes": item["notes"],
+                                    "source": seed["source"],
+                                }
+                            ]
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+                added += 1
+                baseline_changed = True
+            else:
+                baseline_mask = baselines["baseline_id"].astype(str) == baseline_id
+                coverage = baselines.loc[
+                    baseline_mask, "statement_coverage_start"
+                ].iloc[0]
+                if _is_missing(coverage):
+                    baselines.loc[
+                        baseline_mask, "statement_coverage_start"
+                    ] = item.get("statement_coverage_start", item["purchase_date"])
+                    baseline_changed = True
+        if added or updated or baseline_changed:
+            self.store.update(
+                {
+                    "Properties": properties,
+                    "Loans": loans,
+                    "Historical_Baselines": baselines,
+                }
+            )
+            self.reconcile_historical_maintenance(refresh=False)
+            self.refresh_metrics()
+        return {"added": added, "updated_properties": updated}
+
+    def apply_statement_history_seed(self, seed_path: Path) -> dict:
+        """Idempotently load normalized monthly history bundled with the app."""
+        seed_path = Path(seed_path)
+        if not seed_path.exists():
+            return {"statements_added": 0, "transactions_added": 0}
+        payload = json.loads(seed_path.read_text(encoding="utf-8"))
+        seed_version = str(payload.get("seed_version", 1))
+        settings = self.store.read("App_Settings")
+        applied = settings[settings["key"].astype(str) == "statement_history_seed_version"]
+        if not applied.empty and str(applied.iloc[-1]["value"]) == seed_version:
+            return {"statements_added": 0, "transactions_added": 0}
+        sheets = payload.get("sheets", {})
+        baselines = self.store.read("Historical_Baselines")
+        property_map = {
+            str(row["property_key"]): str(row["property_id"])
+            for row in baselines.to_dict("records")
+        }
+        if not property_map:
+            raise ValueError("Historical properties must be seeded before statements")
+
+        existing_statements = self.store.read("Statements")
+        active_periods = {
+            (str(row.get("period_start")), str(row.get("period_end")))
+            for row in existing_statements.to_dict("records")
+            if str(row.get("status")) == "active"
+        }
+        existing_hashes = set(existing_statements["sha256"].dropna().astype(str))
+        incoming_statements = []
+        statement_ids = set(existing_statements["statement_id"].dropna().astype(str))
+        accepted_ids = set()
+        for row in sheets.get("Statements", []):
+            statement_id = str(row["statement_id"])
+            if statement_id in statement_ids:
+                mask = existing_statements["statement_id"].astype(str) == statement_id
+                for key, value in row.items():
+                    if key in existing_statements.columns:
+                        existing_statements.loc[mask, key] = value
+                accepted_ids.add(statement_id)
+                continue
+            period = (str(row.get("period_start")), str(row.get("period_end")))
+            if str(row.get("sha256")) in existing_hashes or period in active_periods:
+                continue
+            incoming_statements.append(row)
+            accepted_ids.add(statement_id)
+
+        replacements = {"Statements": existing_statements}
+        if incoming_statements:
+            replacements["Statements"] = pd.concat(
+                [existing_statements, pd.DataFrame(incoming_statements)],
+                ignore_index=True,
+            )
+        for sheet in (
+            "Transactions",
+            "Property_Summaries",
+            "Work_Orders",
+            "Import_Errors",
+        ):
+            incoming = [
+                dict(row)
+                for row in sheets.get(sheet, [])
+                if str(row.get("statement_id")) in accepted_ids
+            ]
+            for row in incoming:
+                key = row.pop("property_key", None)
+                if key is not None:
+                    if str(key) not in property_map:
+                        raise ValueError(f"Unknown statement seed property: {key}")
+                    row["property_id"] = property_map[str(key)]
+            if incoming:
+                existing = self.store.read(sheet)
+                id_column = {
+                    "Transactions": "transaction_id",
+                    "Property_Summaries": "summary_id",
+                    "Work_Orders": "work_order_id",
+                    "Import_Errors": "error_id",
+                }[sheet]
+                new_rows = []
+                known = set(existing[id_column].dropna().astype(str))
+                for row in incoming:
+                    record_id = str(row.get(id_column))
+                    if record_id in known:
+                        mask = existing[id_column].astype(str) == record_id
+                        for key, value in row.items():
+                            if key in existing.columns:
+                                existing.loc[mask, key] = value
+                    else:
+                        new_rows.append(row)
+                        known.add(record_id)
+                replacements[sheet] = (
+                    pd.concat([existing, pd.DataFrame(new_rows)], ignore_index=True)
+                    if new_rows
+                    else existing
+                )
+        settings = settings[settings["key"].astype(str) != "statement_history_seed_version"]
+        replacements["App_Settings"] = pd.concat(
+            [
+                settings,
+                pd.DataFrame(
+                    [
+                        {
+                            "key": "statement_history_seed_version",
+                            "value": seed_version,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+        self.store.update(replacements)
+        self.reconcile_historical_maintenance(refresh=False)
+        self.refresh_metrics()
+        return {
+            "statements_added": len(incoming_statements),
+            "transactions_added": sum(
+                1
+                for row in sheets.get("Transactions", [])
+                if str(row.get("statement_id"))
+                in {str(item["statement_id"]) for item in incoming_statements}
+            ),
+        }
+
+    def reconcile_historical_maintenance(self, refresh: bool = True) -> int:
+        """Reconcile cumulative maintenance with statement-derived maintenance.
+
+        Until every expected historical statement is present, the owner-provided
+        note estimate remains in effect and is clearly marked provisional.
+        """
+        baselines = self.store.read("Historical_Baselines")
+        if baselines.empty:
+            return 0
+        transactions = self.store.read("Transactions")
+        statements = self.store.read("Statements")
+        properties = self.store.read("Properties")
+        external = self.store.read("External_Expenses")
+        active = (
+            statements[statements["status"].astype(str) == "active"]
+            if not statements.empty
+            else statements
+        )
+        imported_periods = set()
+        for statement in active.to_dict("records"):
+            try:
+                imported_periods.add(
+                    str(pd.Period(pd.to_datetime(statement["period_end"]), freq="M"))
+                )
+            except (TypeError, ValueError):
+                continue
+        property_map = (
+            properties.set_index("property_id").to_dict("index")
+            if not properties.empty
+            else {}
+        )
+        generated_ids = {
+            f"hist_owner_maintenance_{key}"
+            for key in baselines["property_key"].dropna().astype(str)
+        }
+        external = external[~external["expense_id"].astype(str).isin(generated_ids)]
+        generated = []
+        changed = 0
+        for index, baseline in baselines.iterrows():
+            property_id = str(baseline["property_id"])
+            cutoff = pd.to_datetime(baseline["as_of_date"])
+            purchase = pd.to_datetime(
+                property_map.get(property_id, {}).get("purchase_date"), errors="coerce"
+            )
+            coverage_start = pd.to_datetime(
+                baseline.get("statement_coverage_start"), errors="coerce"
+            )
+            expected_start = coverage_start if pd.notna(coverage_start) else purchase
+            expected = (
+                {
+                    str(period)
+                    for period in pd.period_range(expected_start, cutoff, freq="M")
+                }
+                if pd.notna(expected_start)
+                else set()
+            )
+            missing_periods = sorted(expected - imported_periods)
+            subset = transactions[
+                transactions["property_id"].astype(str) == property_id
+            ].copy()
+            if not subset.empty:
+                subset["date"] = pd.to_datetime(subset["date"], errors="coerce")
+                subset = subset[
+                    (subset["date"] <= cutoff)
+                    & (subset["date"] >= purchase if pd.notna(purchase) else True)
+                ]
+            observed_maintenance = (
+                pd.to_numeric(
+                    subset.loc[
+                        subset["category"].astype(str) == "Repairs & Maintenance",
+                        "cash_out",
+                    ],
+                    errors="coerce",
+                )
+                .fillna(0)
+                .sum()
+                if not subset.empty
+                else 0.0
+            )
+            observed_capex = (
+                pd.to_numeric(
+                    subset.loc[
+                        subset["financial_classification"].astype(str)
+                        == "Capital Improvement / CapEx",
+                        "cash_out",
+                    ],
+                    errors="coerce",
+                )
+                .fillna(0)
+                .sum()
+                if not subset.empty
+                else 0.0
+            )
+            baseline_maintenance = _safe_float(baseline["maintenance"])
+            baseline_capex = _safe_float(baseline["renovations"])
+            property_work_total = baseline_maintenance + baseline_capex
+            adjusted_capex = max(baseline_capex, observed_capex)
+            adjusted_maintenance = max(
+                observed_maintenance,
+                max(0.0, property_work_total - adjusted_capex),
+            )
+            cost_adjustment = max(
+                0.0,
+                adjusted_maintenance + adjusted_capex - property_work_total,
+            )
+            adjusted_cash_result = (
+                _safe_float(baseline["cash_profit_loss"]) - cost_adjustment
+            )
+            if not missing_periods and expected:
+                owner_paid = max(0.0, adjusted_maintenance - observed_maintenance)
+                status = "Reconciled"
+                if cost_adjustment > 0.02:
+                    status += (
+                        f"; statement costs added {cost_adjustment:.2f} above prior baseline"
+                    )
+            else:
+                owner_paid = _safe_float(baseline["owner_paid_maintenance"])
+                status = (
+                    f"Provisional; awaiting {len(missing_periods)} monthly statement(s). "
+                    f"Observed statement maintenance: {observed_maintenance:.2f}"
+                )
+            baselines.at[index, "statement_maintenance"] = observed_maintenance
+            baselines.at[index, "statement_capex"] = observed_capex
+            baselines.at[index, "adjusted_maintenance"] = adjusted_maintenance
+            baselines.at[index, "adjusted_capex"] = adjusted_capex
+            baselines.at[index, "adjusted_cash_profit_loss"] = adjusted_cash_result
+            baselines.at[index, "owner_paid_maintenance"] = owner_paid
+            baselines.at[index, "reconciliation_status"] = status
+            if owner_paid > 0.005:
+                key = str(baseline["property_key"])
+                expense_id = f"hist_owner_maintenance_{key}"
+                dedupe_key = hashlib.sha256(expense_id.encode()).hexdigest()
+                generated.append(
+                    {
+                        "expense_id": expense_id,
+                        "date": pd.to_datetime(baseline["as_of_date"])
+                        .date()
+                        .isoformat(),
+                        "property_id": property_id,
+                        "unit_id": "",
+                        "vendor": "Various owner-paid vendors",
+                        "description": "Cumulative owner-paid maintenance through June 2025",
+                        "amount": owner_paid,
+                        "category": "Repairs & Maintenance",
+                        "financial_classification": "Maintenance / Operating Expense",
+                        "payment_method": "",
+                        "notes": status,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "Historical baseline reconciliation",
+                        "dedupe_key": dedupe_key,
+                    }
+                )
+            changed += 1
+        if generated:
+            external = pd.concat([external, pd.DataFrame(generated)], ignore_index=True)
+        self.store.update(
+            {
+                "Historical_Baselines": baselines,
+                "External_Expenses": external,
+            }
+        )
+        if refresh:
+            self.refresh_metrics()
+        return changed
 
     def analyze_statement(self, pdf_path: Path) -> tuple[ParsedStatement, str, int]:
         parsed = AppFolioParser(pdf_path).parse()
@@ -270,6 +728,7 @@ class PortfolioManager:
                 ignore_index=True,
             )
         self.store.update(replacements)
+        self.reconcile_historical_maintenance(refresh=False)
         self.refresh_metrics()
         return {
             "status": state,
@@ -347,6 +806,25 @@ class PortfolioManager:
             )
             self.refresh_metrics()
         return len(accepted), duplicates
+
+    def delete_external_expense(self, expense_id: str) -> None:
+        """Delete a user-entered expense while protecting generated history rows."""
+        expenses = self.store.read("External_Expenses")
+        match = expenses[expenses["expense_id"].astype(str) == str(expense_id)]
+        if match.empty:
+            raise ValueError("The selected expense no longer exists")
+        if str(match.iloc[0].get("source") or "") == "Historical baseline reconciliation":
+            raise ValueError(
+                "Reconciled historical maintenance cannot be deleted here; it is regenerated from the June 2025 baseline and statements."
+            )
+        self.store.update(
+            {
+                "External_Expenses": expenses[
+                    expenses["expense_id"].astype(str) != str(expense_id)
+                ]
+            }
+        )
+        self.refresh_metrics()
 
     def save_property_setup(
         self, property_record: dict, loan_record: dict | None
@@ -429,6 +907,23 @@ class PortfolioManager:
         self.store.update({"Monthly_Metrics": metrics})
         self.store.refresh_excel_dashboards(metrics)
         return metrics
+
+    def refresh_for_calculation_version(self, version: str) -> bool:
+        settings = self.store.read("App_Settings")
+        current = settings[settings["key"].astype(str) == "calculation_version"]
+        if not current.empty and str(current.iloc[0]["value"]) == str(version):
+            return False
+        self.refresh_metrics()
+        settings = settings[settings["key"].astype(str) != "calculation_version"]
+        settings = pd.concat(
+            [
+                settings,
+                pd.DataFrame([{"key": "calculation_version", "value": str(version)}]),
+            ],
+            ignore_index=True,
+        )
+        self.store.update({"App_Settings": settings})
+        return True
 
     def remap_units(self) -> int:
         transactions, units = self.store.read("Transactions"), self.store.read("Units")

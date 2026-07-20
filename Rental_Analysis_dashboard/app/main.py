@@ -28,6 +28,9 @@ WORKBOOK = DATA_DIR / "Rental_Portfolio.xlsx"
 
 st.set_page_config(page_title="Rental Portfolio Tracker", page_icon="🏠", layout="wide")
 manager = PortfolioManager(WORKBOOK)
+manager.apply_historical_seed(DATA_DIR / "historical_seed_june_2025.json")
+manager.apply_statement_history_seed(DATA_DIR / "statement_history_through_2026_06.json")
+manager.refresh_for_calculation_version("4.0.0")
 store = manager.store
 
 
@@ -61,20 +64,24 @@ def portfolio_overview() -> None:
         return
     scope = st.segmented_control(
         "Time period",
-        ["Latest month", "Year to date", "Trailing 12 months", "All time"],
-        default="Trailing 12 months",
+        ["Latest month", "Year to date", "Trailing 12 months", "Since purchase"],
+        default="Since purchase",
     )
     summary, period_label = summarize_cash_performance(
         metrics,
         store.read("Properties"),
         store.read("Loans"),
         scope or "Trailing 12 months",
+        store.read("Historical_Baselines"),
+        store.read("Statements"),
     )
     if summary.empty:
         st.info("There is no activity in this period.")
         return
     total_income = summary["operating_revenue"].sum()
+    rental_income = summary["rental_income"].sum()
     operating_costs = summary["operating_expenses"].sum()
+    maintenance = summary["maintenance"].sum()
     mortgage_payments = summary["debt_service"].sum()
     improvements = summary["capex"].sum()
     total_costs = operating_costs + mortgage_payments + improvements
@@ -110,13 +117,86 @@ def portfolio_overview() -> None:
     else:
         names = ", ".join(incomplete["property_name"].astype(str))
         st.warning(
-            f"This result is preliminary because financing setup is incomplete for: {names}. "
-            "Complete each property's cash-or-mortgage information so mortgage payments are not treated as zero."
+            f"This result is preliminary because setup or statement history is incomplete for: {names}. "
+            "Open Property Setup for financing details and import all missing monthly statements."
         )
     st.info(
         "Accuracy reminder: add taxes, insurance, HOA, repairs, and other costs you paid directly under Owner-Paid Expenses. "
         "Unrealized property appreciation is not counted as cash profit."
     )
+    ratio_cols = st.columns(4)
+    ratio_cols[0].metric("Maintenance", money(maintenance))
+    ratio_cols[1].metric(
+        "Average maintenance %",
+        f"{maintenance / rental_income:.1%}" if rental_income else "N/A",
+        help="Cumulative maintenance divided by collected rental income for the selected period.",
+    )
+    ratio_cols[2].metric(
+        "Capital improvements %",
+        f"{improvements / rental_income:.1%}" if rental_income else "N/A",
+        help="Cumulative capital improvements divided by collected rental income for the selected period.",
+    )
+    ratio_cols[3].metric("Collected rental income", money(rental_income))
+    baselines = store.read("Historical_Baselines")
+    if not baselines.empty:
+        property_names = (
+            store.read("Properties")
+            .set_index("property_id")["name"]
+            .astype(str)
+            .to_dict()
+        )
+        historical = baselines.copy()
+        historical["Property"] = historical["property_id"].map(property_names)
+        historical["Through"] = historical["as_of_date"]
+        historical["Historical rent"] = historical["total_rent"]
+        historical["Historical cash profit / loss"] = historical["cash_profit_loss"]
+        historical["Adjusted cash profit / loss"] = historical[
+            "adjusted_cash_profit_loss"
+        ]
+        historical["Statement maintenance"] = historical["statement_maintenance"]
+        historical["Statement CapEx"] = historical["statement_capex"]
+        historical["Adjusted maintenance"] = historical["adjusted_maintenance"]
+        historical["Adjusted CapEx"] = historical["adjusted_capex"]
+        historical["Owner-paid maintenance"] = historical["owner_paid_maintenance"]
+        historical["Maintenance reconciliation"] = historical["reconciliation_status"]
+        with st.expander("Historical baseline through June 2025"):
+            st.caption(
+                "These cumulative figures are counted once in Since purchase results. "
+                "Maintenance above statement-derived charges is reconciled as owner-paid. "
+                "Statement-supported roof, renovation, make-ready, and unit-turn work is shown as CapEx; the total historical cost is unchanged."
+            )
+            st.dataframe(
+                historical[
+                    [
+                        "Property",
+                        "Through",
+                        "Historical rent",
+                        "Historical cash profit / loss",
+                        "Adjusted cash profit / loss",
+                        "Statement maintenance",
+                        "Statement CapEx",
+                        "Adjusted maintenance",
+                        "Adjusted CapEx",
+                        "Owner-paid maintenance",
+                        "Maintenance reconciliation",
+                    ]
+                ],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    column: st.column_config.NumberColumn(column, format="$%.2f")
+                    for column in [
+                        "Historical rent",
+                        "Historical cash profit / loss",
+                        "Adjusted cash profit / loss",
+                        "Statement maintenance",
+                        "Statement CapEx",
+                        "Adjusted maintenance",
+                        "Adjusted CapEx",
+                        "Owner-paid maintenance",
+                    ]
+                },
+            )
     investor_table = summary.assign(
         **{
             "Property": summary["property_name"],
@@ -124,8 +204,11 @@ def portfolio_overview() -> None:
             "Cash profit / loss": summary["cash_flow_after_debt"],
             "Income": summary["operating_revenue"],
             "Operating costs": summary["operating_expenses"],
+            "Maintenance": summary["maintenance"],
+            "Average maintenance %": summary["maintenance_pct_rent"] * 100,
             "Mortgage payments": summary["debt_service"],
             "Capital improvements": summary["capex"],
+            "Capital improvements %": summary["capex_pct_rent"] * 100,
             "Setup": summary["setup_status"],
         }
     )[
@@ -135,8 +218,11 @@ def portfolio_overview() -> None:
             "Cash profit / loss",
             "Income",
             "Operating costs",
+            "Maintenance",
+            "Average maintenance %",
             "Mortgage payments",
             "Capital improvements",
+            "Capital improvements %",
             "Setup",
         ]
     ].sort_values("Cash profit / loss", ascending=False)
@@ -151,8 +237,16 @@ def portfolio_overview() -> None:
                 "Cash profit / loss",
                 "Income",
                 "Operating costs",
+                "Maintenance",
                 "Mortgage payments",
                 "Capital improvements",
+            ]
+        }
+        | {
+            column: st.column_config.NumberColumn(column, format="%.1f%%")
+            for column in [
+                "Average maintenance %",
+                "Capital improvements %",
             ]
         },
     )
@@ -168,6 +262,17 @@ def portfolio_overview() -> None:
                 "Break-even": "#7f8c8d",
             },
             title="Cash profit or loss by property",
+        ),
+        width="stretch",
+    )
+    st.plotly_chart(
+        px.bar(
+            investor_table,
+            x="Property",
+            y=["Average maintenance %", "Capital improvements %"],
+            barmode="group",
+            title="Property work as a percentage of collected rent",
+            labels={"value": "% of collected rent", "variable": "Cost type"},
         ),
         width="stretch",
     )
@@ -272,26 +377,36 @@ def performance(unit_level: bool = False) -> None:
     )
     scope = st.segmented_control(
         "Time period",
-        ["Latest month", "Year to date", "Trailing 12 months", "All time"],
-        default="Trailing 12 months",
+        ["Latest month", "Year to date", "Trailing 12 months", "Since purchase"],
+        default="Since purchase",
         key="property_scope",
     )
     data = metrics[metrics["property_id"].astype(str) == str(selected)].copy()
     if data.empty:
         st.info("No financial activity has been recorded for this property.")
         return
+    selected_baselines = store.read("Historical_Baselines")
+    selected_baselines = selected_baselines[
+        selected_baselines["property_id"].astype(str) == str(selected)
+    ]
     summary, period_label = summarize_cash_performance(
-        data, properties, store.read("Loans"), scope or "Trailing 12 months"
+        data,
+        properties,
+        store.read("Loans"),
+        scope or "Trailing 12 months",
+        selected_baselines,
+        store.read("Statements"),
     )
     result = summary.iloc[0]
     cash_result = float(result["cash_flow_after_debt"])
     st.subheader(f"{result['result']}: {money(abs(cash_result))} · {period_label}")
     if result["setup_status"] != "Complete":
         st.warning(
-            f"Preliminary result — {result['setup_note']}. Complete Property Setup before relying on this result."
+            f"Preliminary result — {result['setup_note']}. Resolve the noted setup or statement gaps before relying on this result."
         )
     income = float(result["operating_revenue"])
     operating = float(result["operating_expenses"])
+    maintenance = float(result["maintenance"])
     mortgage = float(result["debt_service"])
     capex = float(result["capex"])
     cols = st.columns(5)
@@ -300,9 +415,27 @@ def performance(unit_level: bool = False) -> None:
     cols[2].metric("Mortgage payments", money(mortgage))
     cols[3].metric("Improvements", money(capex))
     cols[4].metric("Cash profit / loss", money(cash_result))
+    ratio_cols = st.columns(4)
+    ratio_cols[0].metric("Maintenance", money(maintenance))
+    ratio_cols[1].metric(
+        "Average maintenance %",
+        f"{float(result['maintenance_pct_rent']):.1%}"
+        if pd.notna(result["maintenance_pct_rent"])
+        else "N/A",
+        help="Cumulative maintenance divided by collected rental income for this property and selected period.",
+    )
+    ratio_cols[2].metric(
+        "Capital improvements %",
+        f"{float(result['capex_pct_rent']):.1%}"
+        if pd.notna(result["capex_pct_rent"])
+        else "N/A",
+        help="Cumulative capital improvements divided by collected rental income for this property and selected period.",
+    )
+    ratio_cols[3].metric("Collected rent", money(result["rental_income"]))
     numeric = [
         "operating_revenue",
         "operating_expenses",
+        "maintenance",
         "debt_service",
         "capex",
         "cash_flow_after_debt",
@@ -313,6 +446,7 @@ def performance(unit_level: bool = False) -> None:
             "period": "Month",
             "operating_revenue": "Income",
             "operating_expenses": "Operating costs",
+            "maintenance": "Maintenance",
             "debt_service": "Mortgage payments",
             "capex": "Capital improvements",
             "cash_flow_after_debt": "Cash profit / loss",
@@ -331,6 +465,28 @@ def performance(unit_level: bool = False) -> None:
             ],
             barmode="group",
             title=f"Monthly cash performance — {options[selected]}",
+        ),
+        width="stretch",
+    )
+    percent_trend = data.copy()
+    percent_trend["Maintenance % of rent"] = (
+        percent_trend["maintenance"]
+        / pd.to_numeric(percent_trend["rental_income"], errors="coerce").replace(0, pd.NA)
+        * 100
+    )
+    percent_trend["Capital improvements % of rent"] = (
+        percent_trend["capex"]
+        / pd.to_numeric(percent_trend["rental_income"], errors="coerce").replace(0, pd.NA)
+        * 100
+    )
+    st.plotly_chart(
+        px.line(
+            percent_trend,
+            x="period",
+            y=["Maintenance % of rent", "Capital improvements % of rent"],
+            markers=True,
+            title="Monthly property costs as a percentage of collected rent",
+            labels={"period": "Month", "value": "% of collected rent"},
         ),
         width="stretch",
     )
@@ -986,7 +1142,43 @@ def external_expenses() -> None:
             except Exception as exc:
                 st.error(str(exc))
     st.subheader("Recorded owner-paid items")
-    st.dataframe(store.read("External_Expenses"), width="stretch", hide_index=True)
+    recorded = store.read("External_Expenses")
+    st.dataframe(recorded, width="stretch", hide_index=True)
+    removable = recorded[
+        recorded["source"].astype(str) != "Historical baseline reconciliation"
+    ]
+    if not removable.empty:
+        with st.expander("Delete an expense added by mistake"):
+            removable = removable.copy()
+            property_names = properties.set_index("property_id")["name"].to_dict()
+            removable["label"] = removable.apply(
+                lambda row: (
+                    f"{row.get('date')} · "
+                    f"{property_names.get(row.get('property_id'), row.get('property_id'))} · "
+                    f"{row.get('description')} · {money(row.get('amount'))}"
+                ),
+                axis=1,
+            )
+            labels = removable.set_index("expense_id")["label"].to_dict()
+            selected_expense = st.selectbox(
+                "Expense to delete",
+                labels,
+                format_func=lambda value: labels[value],
+            )
+            confirmed = st.checkbox(
+                "I understand this permanently removes the selected expense from the workbook"
+            )
+            if st.button(
+                "Delete selected expense",
+                type="primary",
+                disabled=not confirmed,
+            ):
+                try:
+                    manager.delete_external_expense(selected_expense)
+                    st.success("Expense deleted and calculations refreshed.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
 
 
 def review() -> None:

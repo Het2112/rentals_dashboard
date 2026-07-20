@@ -84,8 +84,14 @@ class AppFolioParser:
         lines = [line for line in lines if not line.startswith("Property Manager:")]
         if not lines:
             return None
-        # Headers sometimes wrap an address across two lines.
-        return " ".join(lines).strip()
+        # The property is the final heading before the manager line. Older packets
+        # also repeat company/owner/period boilerplate on that page, so joining all
+        # preceding text creates a false property. A wrapped ZIP code is the only
+        # continuation used by the supplied AppFolio packets.
+        heading = lines[-1]
+        if re.fullmatch(r"\d{5}(?:-\d{4})?", heading) and len(lines) > 1:
+            heading = f"{lines[-2]} {heading}"
+        return heading.strip()
 
     @staticmethod
     def _summary(text: str, property_name: str) -> dict:
@@ -111,10 +117,38 @@ class AppFolioParser:
             return "Rent", "Income"
         if "management fee" in value:
             return "Management Fees", "Maintenance / Operating Expense"
-        if "water" in value or "utility" in value:
+        if (
+            "utility" in value
+            or "water bill" in value
+            or re.search(r"(?:^|\s)-\s*(?:water|gas|electricity)\s*-", value)
+        ):
             return "Utilities", "Maintenance / Operating Expense"
         if any(
-            word in value for word in ("repair", "maintenance", "pest", "grass", "lawn")
+            phrase in value
+            for phrase in (
+                "capital improvement",
+                "roof replacement",
+                "new roof",
+                "renovation",
+                "remodel",
+                "make ready",
+                "unit turn",
+            )
+        ):
+            return "Capital Improvements", "Capital Improvement / CapEx"
+        if any(
+            word in value
+            for word in (
+                "repair",
+                "maintenance",
+                "pest",
+                "grass",
+                "lawn",
+                "plumb",
+                "appliance",
+                "cleaning",
+                "supplies",
+            )
         ):
             return "Repairs & Maintenance", "Maintenance / Operating Expense"
         if "tax" in value:
