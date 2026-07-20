@@ -5,15 +5,23 @@ from __future__ import annotations
 import tempfile
 import uuid
 from pathlib import Path
+import sys
 
-import pandas as pd
-import plotly.express as px
-import streamlit as st
-
-from app.processor import PortfolioManager
-from app.schema import FINANCIAL_CLASSIFICATIONS
-
+# Streamlit executes this file as a script. In that mode it may add ``app/``
+# rather than the repository root to sys.path (notably on macOS), which makes
+# absolute imports such as ``app.processor`` fail unless the project happened
+# to be installed editable. Bootstrap the root before importing local modules.
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import pandas as pd  # noqa: E402
+import plotly.express as px  # noqa: E402
+import streamlit as st  # noqa: E402
+
+from app.processor import PortfolioManager  # noqa: E402
+from app.schema import FINANCIAL_CLASSIFICATIONS  # noqa: E402
+
 DATA_DIR = ROOT / "data"
 WORKBOOK = DATA_DIR / "Rental_Portfolio.xlsx"
 

@@ -1,9 +1,30 @@
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from app.processor import PortfolioManager
+
+
+def test_streamlit_entrypoint_bootstraps_project_root():
+    root = Path(__file__).resolve().parents[1]
+    script = (
+        "import runpy,sys; "
+        f"sys.path=[p for p in sys.path if p != {str(root)!r}]; "
+        f"runpy.run_path({str(root / 'app' / 'main.py')!r}, run_name='__main__')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=root.parent,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ModuleNotFoundError: No module named 'app'" not in result.stderr
 
 
 def test_import_duplicate_revision_and_registry(tmp_path, sample_pdf):
