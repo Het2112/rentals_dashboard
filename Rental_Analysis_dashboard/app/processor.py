@@ -42,8 +42,11 @@ class PortfolioManager:
         properties = self.store.read("Properties")
         loans = self.store.read("Loans")
         baselines = self.store.read("Historical_Baselines")
+        recurring_costs = self.store.read("Recurring_Costs")
         added = updated = 0
         baseline_changed = False
+        recurring_changed = False
+        property_ids_by_key = {}
         for item in seed["properties"]:
             calculated = round(
                 _safe_float(item["total_rent"])
@@ -86,6 +89,7 @@ class PortfolioManager:
                 )
                 match_index = properties.index[-1]
             property_id = str(properties.at[match_index, "property_id"])
+            property_ids_by_key[item["property_key"]] = property_id
             seeded_fields = {
                 "purchase_date": item["purchase_date"],
                 "purchase_price": item["purchase_price"],
@@ -95,11 +99,21 @@ class PortfolioManager:
                 "property_type": item["property_type"],
                 "financing_type": "Mortgage",
             }
+            for field in (
+                "annual_taxes",
+                "annual_insurance",
+                "carrying_costs_effective_date",
+            ):
+                if field in item:
+                    seeded_fields[field] = item[field]
             property_changed = False
             for field, value in seeded_fields.items():
                 current = properties.at[match_index, field]
                 if _is_missing(current) or (
                     field == "property_type" and current == "Needs review"
+                ) or (
+                    field in {"annual_taxes", "annual_insurance"}
+                    and _safe_float(current) <= 0
                 ):
                     properties.at[match_index, field] = value
                     property_changed = True
@@ -191,12 +205,65 @@ class PortfolioManager:
                         baseline_mask, "statement_coverage_start"
                     ] = item.get("statement_coverage_start", item["purchase_date"])
                     baseline_changed = True
-        if added or updated or baseline_changed:
+        for cost in seed.get("recurring_costs", []):
+            property_id = property_ids_by_key[str(cost["property_key"])]
+            cost_slug = _normalized(cost["cost_type"])
+            effective_slug = str(cost["effective_date"]).replace("-", "")
+            recurring_id = (
+                f"recurring_{cost['property_key']}_{cost_slug}_{effective_slug}"
+            )
+            record = {
+                "recurring_cost_id": recurring_id,
+                "property_id": property_id,
+                "cost_type": cost["cost_type"],
+                "annual_amount": cost["annual_amount"],
+                "effective_date": cost["effective_date"],
+                "stop_equity_pct": cost.get("stop_equity_pct"),
+                "equity_basis": cost.get("equity_basis"),
+                "notes": "Owner-provided recurring carrying cost",
+                "source": seed["source"],
+            }
+            match = recurring_costs["recurring_cost_id"].astype(str) == recurring_id
+            if match.any():
+                existing_cost = recurring_costs.loc[match].iloc[0]
+                existing_date = pd.to_datetime(
+                    existing_cost["effective_date"], errors="coerce"
+                )
+                desired_date = pd.to_datetime(cost["effective_date"])
+                needs_update = (
+                    str(existing_cost["property_id"]) != property_id
+                    or str(existing_cost["cost_type"]) != str(cost["cost_type"])
+                    or abs(
+                        _safe_float(existing_cost["annual_amount"])
+                        - _safe_float(cost["annual_amount"])
+                    )
+                    > 0.005
+                    or pd.isna(existing_date)
+                    or existing_date.date() != desired_date.date()
+                    or abs(
+                        _safe_float(existing_cost.get("stop_equity_pct"))
+                        - _safe_float(cost.get("stop_equity_pct"))
+                    )
+                    > 0.005
+                    or str(existing_cost.get("equity_basis") or "")
+                    != str(cost.get("equity_basis") or "")
+                )
+                if needs_update:
+                    for field, value in record.items():
+                        recurring_costs.loc[match, field] = value
+                    recurring_changed = True
+            else:
+                recurring_costs = pd.concat(
+                    [recurring_costs, pd.DataFrame([record])], ignore_index=True
+                )
+                recurring_changed = True
+        if added or updated or baseline_changed or recurring_changed:
             self.store.update(
                 {
                     "Properties": properties,
                     "Loans": loans,
                     "Historical_Baselines": baselines,
+                    "Recurring_Costs": recurring_costs,
                 }
             )
             self.reconcile_historical_maintenance(refresh=False)
@@ -903,6 +970,7 @@ class PortfolioManager:
             self.store.read("Properties"),
             self.store.read("Loans"),
             self.store.read("Property_Values"),
+            self.store.read("Recurring_Costs"),
         )
         self.store.update({"Monthly_Metrics": metrics})
         self.store.refresh_excel_dashboards(metrics)

@@ -128,6 +128,37 @@ def test_owner_historical_seed_is_valid_idempotent_and_preloaded(tmp_path):
     )
     rates = sorted(pd.to_numeric(manager.store.read("Loans")["interest_rate"]).tolist())
     assert rates == [7.13, 7.49, 7.49, 7.49, 8.0]
+    seeded_properties = manager.store.read("Properties")
+    carrying_costs = seeded_properties[
+        pd.to_numeric(seeded_properties["annual_taxes"], errors="coerce") > 0
+    ]
+    assert len(carrying_costs) == 5
+    standard_costs = carrying_costs[
+        pd.to_numeric(carrying_costs["annual_taxes"]) == 3055.62
+    ]
+    assert len(standard_costs) == 3
+    assert set(pd.to_numeric(standard_costs["annual_insurance"])) == {1333.0}
+    assert set(standard_costs["carrying_costs_effective_date"]) == {"2025-01-01"}
+    recurring = manager.store.read("Recurring_Costs")
+    assert len(recurring) == 12
+    mccarley_id = seeded_properties.loc[
+        seeded_properties["name"].astype(str).str.contains(
+            "McCarley", case=False, na=False
+        ),
+        "property_id",
+    ].iloc[0]
+    mccarley_taxes = recurring[
+        (recurring["property_id"].astype(str) == str(mccarley_id))
+        & (recurring["cost_type"] == "Property Tax")
+    ].sort_values("effective_date")
+    assert pd.to_numeric(mccarley_taxes["annual_amount"]).tolist() == [3920.0, 4031.0]
+    mortgage_insurance = recurring[
+        (recurring["property_id"].astype(str) == str(mccarley_id))
+        & (recurring["cost_type"] == "Mortgage Insurance")
+    ].iloc[0]
+    assert float(mortgage_insurance["annual_amount"]) == 1440
+    assert float(mortgage_insurance["stop_equity_pct"]) == 25
+    assert mortgage_insurance["equity_basis"] == "Purchase Price"
     owner_paid = manager.store.read("External_Expenses")
     assert pd.to_numeric(owner_paid["amount"]).sum() == pytest.approx(10375.45)
     assert set(owner_paid["source"]) == {"Historical baseline reconciliation"}

@@ -108,6 +108,186 @@ def test_metrics_keep_noi_capex_debt_and_transfers_separate():
     assert metrics.cash_on_cash == pytest.approx(1300 * 12 / 40500)
 
 
+def test_annual_tax_and_insurance_accrue_monthly_without_double_counting_actuals():
+    tx = pd.DataFrame(
+        [
+            {
+                "date": "2026-01-01",
+                "property_id": "p1",
+                "cash_in": 2000,
+                "cash_out": 0,
+                "category": "Rent",
+                "financial_classification": "Income",
+            },
+            {
+                "date": "2026-01-15",
+                "property_id": "p1",
+                "cash_in": 0,
+                "cash_out": 200,
+                "category": "Taxes",
+                "financial_classification": "Maintenance / Operating Expense",
+            },
+            {
+                "date": "2026-02-01",
+                "property_id": "p2",
+                "cash_in": 1000,
+                "cash_out": 0,
+                "category": "Rent",
+                "financial_classification": "Income",
+            },
+        ]
+    )
+    properties = pd.DataFrame(
+        [
+            {
+                "property_id": "p1",
+                "name": "Rental",
+                "annual_taxes": 1200,
+                "annual_insurance": 600,
+                "carrying_costs_effective_date": "2025-01-01",
+            },
+            {"property_id": "p2", "name": "Other Rental"},
+        ]
+    )
+
+    results = calculate_monthly_metrics(
+        tx, pd.DataFrame(), properties, pd.DataFrame(), pd.DataFrame()
+    )
+    result = results[
+        (results["property_id"] == "p1") & (results["period"] == "2026-01")
+    ].iloc[0]
+    quiet_month = results[
+        (results["property_id"] == "p1") & (results["period"] == "2026-02")
+    ].iloc[0]
+
+    assert result.property_taxes == 200
+    assert result.insurance == 50
+    assert result.operating_expenses == 250
+    assert result.noi == 1750
+    assert result.cash_flow_after_debt == 1750
+    assert quiet_month.property_taxes == 100
+    assert quiet_month.insurance == 50
+    assert quiet_month.cash_flow_after_debt == -150
+
+
+def test_effective_dated_tax_history_uses_the_rate_for_each_year():
+    transactions = pd.DataFrame(
+        [
+            {
+                "date": "2025-12-01",
+                "property_id": "p1",
+                "cash_in": 1000,
+                "cash_out": 0,
+                "category": "Rent",
+                "financial_classification": "Income",
+            },
+            {
+                "date": "2026-01-01",
+                "property_id": "p1",
+                "cash_in": 1000,
+                "cash_out": 0,
+                "category": "Rent",
+                "financial_classification": "Income",
+            },
+        ]
+    )
+    properties = pd.DataFrame([{"property_id": "p1", "name": "Rental"}])
+    recurring = pd.DataFrame(
+        [
+            {
+                "property_id": "p1",
+                "cost_type": "Property Tax",
+                "annual_amount": 1200,
+                "effective_date": "2025-01-01",
+            },
+            {
+                "property_id": "p1",
+                "cost_type": "Property Tax",
+                "annual_amount": 2400,
+                "effective_date": "2026-01-01",
+            },
+            {
+                "property_id": "p1",
+                "cost_type": "Insurance",
+                "annual_amount": 600,
+                "effective_date": "2025-01-01",
+            },
+        ]
+    )
+
+    results = calculate_monthly_metrics(
+        transactions,
+        pd.DataFrame(),
+        properties,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        recurring,
+    ).set_index("period")
+
+    assert results.loc["2025-12", "property_taxes"] == 100
+    assert results.loc["2026-01", "property_taxes"] == 200
+    assert results.loc["2025-12", "insurance"] == 50
+    assert results.loc["2026-01", "insurance"] == 50
+
+
+def test_mortgage_insurance_stops_at_configured_equity_threshold():
+    transactions = pd.DataFrame(
+        [
+            {
+                "date": "2026-01-01",
+                "property_id": "p1",
+                "cash_in": 1000,
+                "cash_out": 0,
+                "category": "Rent",
+                "financial_classification": "Income",
+            }
+        ]
+    )
+    properties = pd.DataFrame(
+        [{"property_id": "p1", "name": "Rental", "purchase_price": 396500}]
+    )
+    recurring = pd.DataFrame(
+        [
+            {
+                "property_id": "p1",
+                "cost_type": "Mortgage Insurance",
+                "annual_amount": 1440,
+                "effective_date": "2023-12-01",
+                "stop_equity_pct": 25,
+                "equity_basis": "Purchase Price",
+            }
+        ]
+    )
+
+    def calculate(balance):
+        loans = pd.DataFrame(
+            [
+                {
+                    "property_id": "p1",
+                    "original_principal": 0,
+                    "current_balance": balance,
+                    "origination_date": "2023-12-01",
+                }
+            ]
+        )
+        return calculate_monthly_metrics(
+            transactions,
+            pd.DataFrame(),
+            properties,
+            loans,
+            pd.DataFrame(),
+            recurring,
+        ).query("period == '2026-01'").iloc[0]
+
+    insured = calculate(300000)
+    threshold_reached = calculate(297000)
+    assert insured.mortgage_insurance == 120
+    assert insured.debt_service == 120
+    assert insured.cash_flow_after_debt == 880
+    assert threshold_reached.mortgage_insurance == 0
+    assert threshold_reached.debt_service == 0
+
+
 def test_manual_balance_correction_restarts_amortization():
     interest, principal, debt, balance = loan_month(
         {

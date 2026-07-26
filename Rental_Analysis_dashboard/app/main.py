@@ -27,10 +27,32 @@ DATA_DIR = ROOT / "data"
 WORKBOOK = DATA_DIR / "Rental_Portfolio.xlsx"
 
 st.set_page_config(page_title="Rental Portfolio Tracker", page_icon="🏠", layout="wide")
+st.markdown(
+    """
+    <style>
+    [data-testid="stMetric"] {
+        background: linear-gradient(135deg, #f8fafc 0%, #eef6f2 100%);
+        border: 1px solid #dbe7e1;
+        border-radius: 14px;
+        padding: 1rem;
+        box-shadow: 0 4px 14px rgba(31, 78, 120, 0.06);
+    }
+    [data-testid="stSidebar"] {
+        border-right: 1px solid #e5e7eb;
+    }
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 manager = PortfolioManager(WORKBOOK)
 manager.apply_historical_seed(DATA_DIR / "historical_seed_june_2025.json")
 manager.apply_statement_history_seed(DATA_DIR / "statement_history_through_2026_06.json")
-manager.refresh_for_calculation_version("4.0.0")
+manager.refresh_for_calculation_version("5.3.0")
 store = manager.store
 
 
@@ -52,15 +74,10 @@ def ui_date(value):
 
 
 def portfolio_overview() -> None:
-    st.title("My Rental Investment Summary")
-    st.caption(
-        "A simple cash view of whether your rentals put money in your pocket or required additional cash."
-    )
+    st.title("Rental Profit & Loss")
     metrics = store.read("Monthly_Metrics")
     if metrics.empty:
-        st.info(
-            "Import an AppFolio statement and complete property details to begin analysis."
-        )
+        st.info("Import a statement to begin.")
         return
     scope = st.segmented_control(
         "Time period",
@@ -78,215 +95,149 @@ def portfolio_overview() -> None:
     if summary.empty:
         st.info("There is no activity in this period.")
         return
-    total_income = summary["operating_revenue"].sum()
-    rental_income = summary["rental_income"].sum()
-    operating_costs = summary["operating_expenses"].sum()
-    maintenance = summary["maintenance"].sum()
-    mortgage_payments = summary["debt_service"].sum()
-    improvements = summary["capex"].sum()
-    total_costs = operating_costs + mortgage_payments + improvements
-    cash_result = summary["cash_flow_after_debt"].sum()
+
+    friendly_names = {
+        "cassady": "Cassady",
+        "mccarley": "McCarley",
+        "karl": "Karl Rd",
+        "audrey": "Audrey",
+        "margaret": "Margaret",
+    }
+    baseline_names = {
+        str(row["property_id"]): friendly_names.get(
+            str(row["property_key"]), str(row["property_key"]).title()
+        )
+        for row in store.read("Historical_Baselines").to_dict("records")
+    }
+    summary["display_name"] = summary.apply(
+        lambda row: baseline_names.get(
+            str(row["property_id"]), str(row["property_name"])
+        ),
+        axis=1,
+    )
+    focus_options = ["Portfolio", *summary["display_name"].tolist()]
+    focus = st.segmented_control(
+        "View",
+        focus_options,
+        default="Portfolio",
+        key="summary_focus",
+    )
+    focused = (
+        summary
+        if focus == "Portfolio"
+        else summary[summary["display_name"] == focus]
+    )
+    cash_result = focused["cash_flow_after_debt"].sum()
+    focused_rent = focused["rental_income"].sum()
+    focused_maintenance = focused["maintenance"].sum()
+    focused_improvements = focused["capex"].sum()
     result_word = (
-        "PROFIT"
+        "Profit"
         if cash_result > 0.005
-        else "LOSS"
+        else "Loss"
         if cash_result < -0.005
-        else "BREAK-EVEN"
+        else "Break-even"
     )
     incomplete = summary[summary["setup_status"] != "Complete"]
-    headline = "Cash profit / loss" if incomplete.empty else "Preliminary cash result"
     st.subheader(period_label)
-    hero, income_col, cost_col, equity_col = st.columns([1.5, 1, 1, 1])
-    hero.metric(headline, money(cash_result), result_word)
-    income_col.metric("Rent and other income", money(total_income))
-    cost_col.metric("All cash costs", money(total_costs))
-    equity_col.metric(
-        "Mortgage principal paid",
-        money(summary["mortgage_principal"].sum()),
-        help="Principal reduces your cash today but builds property equity.",
+    result_col, maintenance_col, improvements_col = st.columns([1.4, 1, 1])
+    result_col.metric(
+        "Portfolio profit / loss" if focus == "Portfolio" else f"{focus} profit / loss",
+        money(cash_result),
+        result_word,
     )
-    if incomplete.empty:
-        if cash_result >= 0:
-            st.success(
-                f"Your rentals generated {money(cash_result)} in cash profit for this period."
-            )
-        else:
-            st.error(
-                f"Your rentals used {money(abs(cash_result))} more cash than they generated for this period."
-            )
-    else:
-        names = ", ".join(incomplete["property_name"].astype(str))
+    maintenance_col.metric(
+        "Maintenance",
+        f"{focused_maintenance / focused_rent:.1%}" if focused_rent else "N/A",
+        help="Cumulative maintenance divided by collected rent.",
+    )
+    improvements_col.metric(
+        "Improvements",
+        f"{focused_improvements / focused_rent:.1%}" if focused_rent else "N/A",
+        help="Cumulative capital improvements divided by collected rent.",
+    )
+    if not incomplete.empty:
+        names = ", ".join(incomplete["display_name"].astype(str))
         st.warning(
-            f"This result is preliminary because setup or statement history is incomplete for: {names}. "
-            "Open Property Setup for financing details and import all missing monthly statements."
+            f"Preliminary until mortgage details are completed for: {names}."
         )
-    st.info(
-        "Accuracy reminder: add taxes, insurance, HOA, repairs, and other costs you paid directly under Owner-Paid Expenses. "
-        "Unrealized property appreciation is not counted as cash profit."
-    )
-    ratio_cols = st.columns(4)
-    ratio_cols[0].metric("Maintenance", money(maintenance))
-    ratio_cols[1].metric(
-        "Average maintenance %",
-        f"{maintenance / rental_income:.1%}" if rental_income else "N/A",
-        help="Cumulative maintenance divided by collected rental income for the selected period.",
-    )
-    ratio_cols[2].metric(
-        "Capital improvements %",
-        f"{improvements / rental_income:.1%}" if rental_income else "N/A",
-        help="Cumulative capital improvements divided by collected rental income for the selected period.",
-    )
-    ratio_cols[3].metric("Collected rental income", money(rental_income))
-    baselines = store.read("Historical_Baselines")
-    if not baselines.empty:
-        property_names = (
-            store.read("Properties")
-            .set_index("property_id")["name"]
-            .astype(str)
-            .to_dict()
-        )
-        historical = baselines.copy()
-        historical["Property"] = historical["property_id"].map(property_names)
-        historical["Through"] = historical["as_of_date"]
-        historical["Historical rent"] = historical["total_rent"]
-        historical["Historical cash profit / loss"] = historical["cash_profit_loss"]
-        historical["Adjusted cash profit / loss"] = historical[
-            "adjusted_cash_profit_loss"
-        ]
-        historical["Statement maintenance"] = historical["statement_maintenance"]
-        historical["Statement CapEx"] = historical["statement_capex"]
-        historical["Adjusted maintenance"] = historical["adjusted_maintenance"]
-        historical["Adjusted CapEx"] = historical["adjusted_capex"]
-        historical["Owner-paid maintenance"] = historical["owner_paid_maintenance"]
-        historical["Maintenance reconciliation"] = historical["reconciliation_status"]
-        with st.expander("Historical baseline through June 2025"):
-            st.caption(
-                "These cumulative figures are counted once in Since purchase results. "
-                "Maintenance above statement-derived charges is reconciled as owner-paid. "
-                "Statement-supported roof, renovation, make-ready, and unit-turn work is shown as CapEx; the total historical cost is unchanged."
-            )
-            st.dataframe(
-                historical[
-                    [
-                        "Property",
-                        "Through",
-                        "Historical rent",
-                        "Historical cash profit / loss",
-                        "Adjusted cash profit / loss",
-                        "Statement maintenance",
-                        "Statement CapEx",
-                        "Adjusted maintenance",
-                        "Adjusted CapEx",
-                        "Owner-paid maintenance",
-                        "Maintenance reconciliation",
-                    ]
-                ],
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    column: st.column_config.NumberColumn(column, format="$%.2f")
-                    for column in [
-                        "Historical rent",
-                        "Historical cash profit / loss",
-                        "Adjusted cash profit / loss",
-                        "Statement maintenance",
-                        "Statement CapEx",
-                        "Adjusted maintenance",
-                        "Adjusted CapEx",
-                        "Owner-paid maintenance",
-                    ]
-                },
-            )
+
     investor_table = summary.assign(
         **{
-            "Property": summary["property_name"],
-            "Result": summary["result"],
-            "Cash profit / loss": summary["cash_flow_after_debt"],
-            "Income": summary["operating_revenue"],
-            "Operating costs": summary["operating_expenses"],
-            "Maintenance": summary["maintenance"],
-            "Average maintenance %": summary["maintenance_pct_rent"] * 100,
-            "Mortgage payments": summary["debt_service"],
-            "Capital improvements": summary["capex"],
-            "Capital improvements %": summary["capex_pct_rent"] * 100,
-            "Setup": summary["setup_status"],
+            "Property": summary["display_name"],
+            "Profit / loss": summary["cash_flow_after_debt"],
+            "Maintenance %": summary["maintenance_pct_rent"] * 100,
+            "Improvements %": summary["capex_pct_rent"] * 100,
         }
     )[
         [
             "Property",
-            "Result",
-            "Cash profit / loss",
-            "Income",
-            "Operating costs",
-            "Maintenance",
-            "Average maintenance %",
-            "Mortgage payments",
-            "Capital improvements",
-            "Capital improvements %",
-            "Setup",
+            "Profit / loss",
+            "Maintenance %",
+            "Improvements %",
         ]
-    ].sort_values("Cash profit / loss", ascending=False)
-    st.subheader("Profit or loss by property")
+    ].sort_values("Profit / loss", ascending=False)
+    st.subheader("By property")
     st.dataframe(
         investor_table,
         width="stretch",
         hide_index=True,
         column_config={
-            column: st.column_config.NumberColumn(column, format="$%.2f")
-            for column in [
-                "Cash profit / loss",
-                "Income",
-                "Operating costs",
-                "Maintenance",
-                "Mortgage payments",
-                "Capital improvements",
-            ]
-        }
-        | {
-            column: st.column_config.NumberColumn(column, format="%.1f%%")
-            for column in [
-                "Average maintenance %",
-                "Capital improvements %",
-            ]
+            "Profit / loss": st.column_config.NumberColumn(format="$%.2f"),
+            "Maintenance %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Improvements %": st.column_config.NumberColumn(format="%.1f%%"),
         },
     )
-    st.plotly_chart(
-        px.bar(
-            investor_table,
-            x="Property",
-            y="Cash profit / loss",
-            color="Result",
-            color_discrete_map={
-                "Profit": "#2e8b57",
-                "Loss": "#c0392b",
-                "Break-even": "#7f8c8d",
-            },
-            title="Cash profit or loss by property",
-        ),
-        width="stretch",
-    )
-    st.plotly_chart(
-        px.bar(
-            investor_table,
-            x="Property",
-            y=["Average maintenance %", "Capital improvements %"],
-            barmode="group",
-            title="Property work as a percentage of collected rent",
-            labels={"value": "% of collected rent", "variable": "Cost type"},
-        ),
-        width="stretch",
-    )
-    with st.expander("How this cash profit/loss is calculated"):
-        st.markdown(
-            """
-            **Cash profit/loss = rent and other income − operating costs − mortgage
-            principal and interest − capital improvements.**
 
-            Owner contributions and distributions are transfers and are excluded.
-            Mortgage principal reduces cash profit but builds equity. Capital
-            improvements reduce cash in the period but do not reduce NOI. This is a
-            cash-investment view, not taxable income.
-            """
+    with st.expander("View cost breakdown and chart"):
+        details = pd.DataFrame(
+            {
+                "Cost": [
+                    "Rent and other income",
+                    "Operating costs",
+                    "Property taxes",
+                    "Insurance",
+                    "Mortgage payments",
+                    "Mortgage insurance",
+                    "Maintenance",
+                    "Capital improvements",
+                ],
+                "Amount": [
+                    summary["operating_revenue"].sum(),
+                    summary["operating_expenses"].sum(),
+                    summary["property_taxes"].sum(),
+                    summary["insurance"].sum(),
+                    (
+                        summary["debt_service"] - summary["mortgage_insurance"]
+                    ).sum(),
+                    summary["mortgage_insurance"].sum(),
+                    summary["maintenance"].sum(),
+                    summary["capex"].sum(),
+                ],
+            }
+        )
+        st.dataframe(
+            details,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Amount": st.column_config.NumberColumn(format="$%.2f")
+            },
+        )
+        st.plotly_chart(
+            px.bar(
+                investor_table,
+                x="Property",
+                y="Profit / loss",
+                color="Profit / loss",
+                color_continuous_scale=["#c0392b", "#f4f4f4", "#2e8b57"],
+                title="Cash profit or loss by property",
+            ),
+            width="stretch",
+        )
+        st.caption(
+            "Profit/loss includes operating costs, taxes, insurance, mortgage principal "
+            "and interest, and capital improvements. Owner transfers are excluded."
         )
 
 
@@ -870,8 +821,16 @@ def manage_properties() -> None:
                     min_value=0.0,
                     value=ui_number(existing.get("annual_hoa")),
                 )
+                carrying_costs_effective_date = st.date_input(
+                    "Tax, insurance, and HOA effective date",
+                    value=ui_date(
+                        existing.get("carrying_costs_effective_date")
+                        or existing.get("purchase_date")
+                    ),
+                )
                 st.caption(
-                    "These are reference values. Record actual owner-paid tax, insurance, and HOA payments under Owner-Paid Expenses for cash profit/loss."
+                    "The dashboard accrues these annual costs monthly in profit/loss. "
+                    "An imported or manually entered actual charge replaces that month's estimate."
                 )
             notes = st.text_area("Notes", value=str(existing.get("notes") or ""))
             if st.form_submit_button("Save property setup", type="primary"):
@@ -893,6 +852,7 @@ def manage_properties() -> None:
                     "annual_taxes": annual_taxes,
                     "annual_insurance": annual_insurance,
                     "annual_hoa": annual_hoa,
+                    "carrying_costs_effective_date": carrying_costs_effective_date.isoformat(),
                     "expected_monthly_rent": expected_rent,
                     "notes": notes,
                 }
@@ -1210,40 +1170,7 @@ def review() -> None:
         st.rerun()
 
 
-page = st.sidebar.radio(
-    "Navigate",
-    [
-        "Investor Summary",
-        "Property Performance",
-        "Unit Performance",
-        "Income & Expenses",
-        "Debt & Equity",
-        "Statements and Imports",
-        "Property Setup",
-        "Owner-Paid Expenses",
-        "Import Review",
-        "Data & Settings",
-    ],
-)
-if page == "Investor Summary":
-    portfolio_overview()
-elif page == "Property Performance":
-    performance()
-elif page == "Unit Performance":
-    performance(True)
-elif page == "Income & Expenses":
-    income_and_expenses()
-elif page == "Debt & Equity":
-    debt_and_equity()
-elif page == "Statements and Imports":
-    import_statements()
-elif page == "Property Setup":
-    manage_properties()
-elif page == "Owner-Paid Expenses":
-    external_expenses()
-elif page == "Import Review":
-    review()
-else:
+def data_and_settings() -> None:
     st.title("Data and Settings")
     st.write(f"Workbook: `{WORKBOOK}`")
     st.download_button(
@@ -1255,3 +1182,58 @@ else:
     if st.button("Recalculate all metrics and Excel charts"):
         manager.refresh_metrics()
         st.success("Metrics refreshed.")
+
+
+def properties_hub() -> None:
+    performance_tab, setup_tab, financing_tab = st.tabs(
+        ["Performance", "Property setup", "Loans & equity"]
+    )
+    with performance_tab:
+        performance()
+    with setup_tab:
+        manage_properties()
+    with financing_tab:
+        debt_and_equity()
+
+
+def statements_hub() -> None:
+    import_tab, review_tab = st.tabs(["Import statements", "Review issues"])
+    with import_tab:
+        import_statements()
+    with review_tab:
+        review()
+
+
+def more_hub() -> None:
+    expenses_tab, units_tab, data_tab = st.tabs(
+        ["Income & expenses", "Units", "Data"]
+    )
+    with expenses_tab:
+        income_and_expenses()
+    with units_tab:
+        performance(True)
+    with data_tab:
+        data_and_settings()
+
+
+page = st.sidebar.radio(
+    "Navigate",
+    [
+        "🏠 Summary",
+        "📊 Properties",
+        "➕ Add Expense",
+        "📄 Statements",
+        "⚙️ More",
+    ],
+)
+st.sidebar.caption("Private rental investment tracker")
+if page == "🏠 Summary":
+    portfolio_overview()
+elif page == "📊 Properties":
+    properties_hub()
+elif page == "➕ Add Expense":
+    external_expenses()
+elif page == "📄 Statements":
+    statements_hub()
+else:
+    more_hub()

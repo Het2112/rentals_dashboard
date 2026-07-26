@@ -155,6 +155,8 @@ class AppFolioParser:
             return "Taxes", "Maintenance / Operating Expense"
         if "insurance" in value:
             return "Insurance", "Maintenance / Operating Expense"
+        if "hoa" in value or "homeowners association" in value:
+            return "HOA", "Maintenance / Operating Expense"
         if transaction_type.lower().endswith("receipt") or "income" in value:
             return "Other Income", "Income"
         return "Other Operating Expense", "Maintenance / Operating Expense"

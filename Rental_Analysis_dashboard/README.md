@@ -16,6 +16,7 @@ A private, local Streamlit application for importing AppFolio owner-statement PD
 - Calculates monthly property and portfolio metrics and creates Streamlit and Excel charts.
 - Supports properties, units, manually entered valuations, and amortized loans.
 - Opens with a plain-language investor summary showing cash profit or loss overall and by property.
+- Keeps the landing page focused on overall/property profit or loss, maintenance %, and improvement %, with details collapsed.
 - Captures mortgage amount, interest rate, term, payment, and current balance during property setup.
 - Preloads the owner-provided cumulative property baseline through June 2025 and keeps it separate from monthly statement activity.
 - Preloads normalized monthly statement history from September 2023 through June 2026, including hashes for duplicate detection; private PDFs are not bundled.
@@ -25,6 +26,8 @@ A private, local Streamlit application for importing AppFolio owner-statement PD
 
 - **NOI** = operating revenue − operating expenses.
 - **Maintenance / Operating Expense** reduces NOI.
+- **Property tax, insurance, and HOA** are accrued monthly from their annual values after the configured effective date. An actual imported/manual charge replaces that month's estimate.
+- Effective-dated recurring costs preserve rate changes by year. Mortgage insurance is included in after-debt cash flow and stops automatically when its configured equity threshold can be verified from the loan balance.
 - **Capital Improvement / CapEx** does not reduce NOI, but reduces cash flow and adds to invested capital.
 - **Mortgage principal and interest** are excluded from NOI and included in after-debt cash flow.
 - **Owner contributions and distributions** are transfers, not revenue or expenses.

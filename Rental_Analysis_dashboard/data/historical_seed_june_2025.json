@@ -5,6 +5,9 @@
     {
       "property_key": "cassady",
       "display_name": "Cassady",
+      "annual_taxes": 3706.00,
+      "annual_insurance": 1208.00,
+      "carrying_costs_effective_date": "2024-01-01",
       "match_terms": ["cassady"],
       "property_type": "Duplex",
       "purchase_date": "2023-08-18",
@@ -29,6 +32,9 @@
     {
       "property_key": "mccarley",
       "display_name": "McCarley",
+      "annual_taxes": 4031.00,
+      "annual_insurance": 3246.00,
+      "carrying_costs_effective_date": "2025-01-01",
       "match_terms": ["mccarley"],
       "property_type": "Fourplex",
       "purchase_date": "2023-12-15",
@@ -53,6 +59,9 @@
     {
       "property_key": "karl",
       "display_name": "Karl Rd",
+      "annual_taxes": 3055.62,
+      "annual_insurance": 1333.00,
+      "carrying_costs_effective_date": "2025-01-01",
       "match_terms": ["karl"],
       "property_type": "Single-family",
       "purchase_date": "2024-07-12",
@@ -77,6 +86,9 @@
     {
       "property_key": "audrey",
       "display_name": "Audrey",
+      "annual_taxes": 3055.62,
+      "annual_insurance": 1333.00,
+      "carrying_costs_effective_date": "2025-01-01",
       "match_terms": ["audrey"],
       "property_type": "Single-family",
       "purchase_date": "2024-07-12",
@@ -101,6 +113,9 @@
     {
       "property_key": "margaret",
       "display_name": "Margaret",
+      "annual_taxes": 3055.62,
+      "annual_insurance": 1333.00,
+      "carrying_costs_effective_date": "2025-01-01",
       "match_terms": ["margaret"],
       "property_type": "Single-family",
       "purchase_date": "2024-07-12",
@@ -122,5 +137,19 @@
       "cash_profit_loss": 1413.33,
       "notes": "No maintenance or utility deficit was supplied. Debt component breakdown was not supplied."
     }
+  ],
+  "recurring_costs": [
+    {"property_key": "cassady", "cost_type": "Property Tax", "annual_amount": 3706.00, "effective_date": "2024-01-01"},
+    {"property_key": "cassady", "cost_type": "Insurance", "annual_amount": 1208.00, "effective_date": "2024-01-01"},
+    {"property_key": "mccarley", "cost_type": "Property Tax", "annual_amount": 3920.00, "effective_date": "2025-01-01"},
+    {"property_key": "mccarley", "cost_type": "Property Tax", "annual_amount": 4031.00, "effective_date": "2026-01-01"},
+    {"property_key": "mccarley", "cost_type": "Insurance", "annual_amount": 3246.00, "effective_date": "2025-01-01"},
+    {"property_key": "mccarley", "cost_type": "Mortgage Insurance", "annual_amount": 1440.00, "effective_date": "2023-12-01", "stop_equity_pct": 25.0, "equity_basis": "Purchase Price"},
+    {"property_key": "karl", "cost_type": "Property Tax", "annual_amount": 3055.62, "effective_date": "2025-01-01"},
+    {"property_key": "karl", "cost_type": "Insurance", "annual_amount": 1333.00, "effective_date": "2025-01-01"},
+    {"property_key": "audrey", "cost_type": "Property Tax", "annual_amount": 3055.62, "effective_date": "2025-01-01"},
+    {"property_key": "audrey", "cost_type": "Insurance", "annual_amount": 1333.00, "effective_date": "2025-01-01"},
+    {"property_key": "margaret", "cost_type": "Property Tax", "annual_amount": 3055.62, "effective_date": "2025-01-01"},
+    {"property_key": "margaret", "cost_type": "Insurance", "annual_amount": 1333.00, "effective_date": "2025-01-01"}
   ]
 }

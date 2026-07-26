@@ -98,7 +98,53 @@ def calculate_monthly_metrics(
     properties: pd.DataFrame,
     loans: pd.DataFrame,
     values: pd.DataFrame,
+    recurring_costs: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    recurring = (
+        recurring_costs.copy()
+        if recurring_costs is not None and not recurring_costs.empty
+        else pd.DataFrame()
+    )
+    if not recurring.empty:
+        recurring["effective_date"] = pd.to_datetime(
+            recurring["effective_date"], errors="coerce"
+        )
+        recurring["effective_period"] = recurring["effective_date"].dt.to_period("M")
+
+    fallback_fields = {
+        "Property Tax": "annual_taxes",
+        "Insurance": "annual_insurance",
+        "HOA": "annual_hoa",
+    }
+
+    def scheduled_record(
+        prop: dict, cost_type: str, period: pd.Period
+    ) -> dict | None:
+        prop_id = str(prop.get("property_id"))
+        if not recurring.empty:
+            history = recurring[
+                (recurring["property_id"].astype(str) == prop_id)
+                & (recurring["cost_type"].astype(str) == cost_type)
+            ]
+            if not history.empty:
+                active = history[history["effective_period"] <= period]
+                if active.empty:
+                    return None
+                latest = active.sort_values("effective_period").iloc[-1]
+                return latest.to_dict()
+        if cost_type not in fallback_fields:
+            return None
+        effective = pd.to_datetime(
+            prop.get("carrying_costs_effective_date"), errors="coerce"
+        )
+        if pd.isna(effective) or period < pd.Period(effective, freq="M"):
+            return None
+        return {"annual_amount": prop.get(fallback_fields[cost_type])}
+
+    def scheduled_annual(prop: dict, cost_type: str, period: pd.Period) -> float:
+        record = scheduled_record(prop, cost_type, period)
+        return _number(record.get("annual_amount")) if record else 0.0
+
     entries = []
     if not transactions.empty:
         tx = transactions.copy()
@@ -124,6 +170,9 @@ def calculate_monthly_metrics(
                     "operating_expenses": cash_out
                     if classification == "Maintenance / Operating Expense"
                     else 0,
+                    "property_taxes": cash_out if category == "Taxes" else 0,
+                    "insurance": cash_out if category == "Insurance" else 0,
+                    "hoa": cash_out if category == "HOA" else 0,
                     "maintenance": cash_out
                     if classification == "Maintenance / Operating Expense"
                     and _is_maintenance(category, row.get("description"))
@@ -156,6 +205,15 @@ def calculate_monthly_metrics(
                     "operating_expenses": amount
                     if classification == "Maintenance / Operating Expense"
                     else 0,
+                    "property_taxes": amount
+                    if "tax" in str(row.get("category") or "").lower()
+                    else 0,
+                    "insurance": amount
+                    if "insurance" in str(row.get("category") or "").lower()
+                    else 0,
+                    "hoa": amount
+                    if "hoa" in str(row.get("category") or "").lower()
+                    else 0,
                     "maintenance": amount
                     if classification == "Maintenance / Operating Expense"
                     and _is_maintenance(
@@ -173,12 +231,57 @@ def calculate_monthly_metrics(
                     else 0,
                 }
             )
+    if entries and not properties.empty:
+        latest_period = max(row["period"] for row in entries)
+        for prop in properties.to_dict("records"):
+            prop_history = (
+                recurring[
+                    recurring["property_id"].astype(str)
+                    == str(prop.get("property_id"))
+                ]
+                if not recurring.empty
+                else pd.DataFrame()
+            )
+            if not prop_history.empty:
+                effective = prop_history["effective_date"].min()
+            else:
+                has_carrying_cost = any(
+                    _number(prop.get(field)) > 0
+                    for field in ("annual_taxes", "annual_insurance", "annual_hoa")
+                )
+                effective = pd.to_datetime(
+                    prop.get("carrying_costs_effective_date"), errors="coerce"
+                )
+                if not has_carrying_cost:
+                    effective = pd.NaT
+            if pd.isna(effective):
+                continue
+            for period in pd.period_range(effective, latest_period, freq="M"):
+                entries.append(
+                    {
+                        "period": period,
+                        "property_id": prop.get("property_id"),
+                        "rental_income": 0,
+                        "other_income": 0,
+                        "operating_expenses": 0,
+                        "property_taxes": 0,
+                        "insurance": 0,
+                        "hoa": 0,
+                        "maintenance": 0,
+                        "capex": 0,
+                        "mortgage_interest": 0,
+                        "mortgage_principal": 0,
+                    }
+                )
     columns = [
         "period",
         "property_id",
         "rental_income",
         "other_income",
         "operating_expenses",
+        "property_taxes",
+        "insurance",
+        "hoa",
         "maintenance",
         "capex",
         "mortgage_interest",
@@ -219,7 +322,19 @@ def calculate_monthly_metrics(
     result = []
     for row in base.to_dict("records"):
         prop_id, period = row["property_id"], row["period"]
-        prop = property_map.get(prop_id, {})
+        prop = {**property_map.get(prop_id, {}), "property_id": prop_id}
+        scheduled_tax = scheduled_annual(prop, "Property Tax", period) / 12
+        scheduled_insurance = scheduled_annual(prop, "Insurance", period) / 12
+        scheduled_hoa = scheduled_annual(prop, "HOA", period) / 12
+        property_taxes = row["property_taxes"] or scheduled_tax
+        insurance = row["insurance"] or scheduled_insurance
+        hoa = row["hoa"] or scheduled_hoa
+        recurring_cost_adjustment = (
+            (scheduled_tax if not row["property_taxes"] else 0)
+            + (scheduled_insurance if not row["insurance"] else 0)
+            + (scheduled_hoa if not row["hoa"] else 0)
+        )
+        operating_expenses = row["operating_expenses"] + recurring_cost_adjustment
         # If no explicit debt rows were entered for the month, estimate them from the loan schedule.
         interest, principal, debt, balance = 0.0, 0.0, 0.0, 0.0
         for loan in loan_map.get(prop_id, []):
@@ -234,8 +349,29 @@ def calculate_monthly_metrics(
             principal = row["mortgage_principal"]
         if row["mortgage_interest"] or row["mortgage_principal"]:
             debt = interest + principal
+        mortgage_insurance_record = scheduled_record(
+            prop, "Mortgage Insurance", period
+        )
+        mortgage_insurance = (
+            _number(mortgage_insurance_record.get("annual_amount")) / 12
+            if mortgage_insurance_record
+            else 0.0
+        )
+        if mortgage_insurance_record and balance > 0:
+            basis = (
+                _number(prop.get("purchase_price"))
+                if mortgage_insurance_record.get("equity_basis")
+                == "Purchase Price"
+                else _number(prop.get("current_value"))
+            )
+            stop_equity_pct = _number(
+                mortgage_insurance_record.get("stop_equity_pct")
+            )
+            if basis > 0 and (basis - balance) / basis * 100 >= stop_equity_pct:
+                mortgage_insurance = 0.0
+        debt += mortgage_insurance
         revenue = row["rental_income"] + row["other_income"]
-        noi = revenue - row["operating_expenses"]
+        noi = revenue - operating_expenses
         cash_flow = noi - debt - row["capex"]
         current_value = _number(prop.get("current_value"))
         for valuation in value_map.get(prop_id, []):
@@ -264,19 +400,23 @@ def calculate_monthly_metrics(
                 "rental_income": row["rental_income"],
                 "other_income": row["other_income"],
                 "operating_revenue": revenue,
-                "operating_expenses": row["operating_expenses"],
+                "operating_expenses": operating_expenses,
+                "property_taxes": property_taxes,
+                "insurance": insurance,
+                "hoa": hoa,
                 "maintenance": row["maintenance"],
                 "noi": noi,
                 "capex": row["capex"],
                 "mortgage_interest": interest,
                 "mortgage_principal": principal,
+                "mortgage_insurance": mortgage_insurance,
                 "debt_service": debt,
                 "cash_flow_after_debt": cash_flow,
                 "expected_rent": expected,
                 "collection_rate": row["rental_income"] / expected
                 if expected
                 else math.nan,
-                "expense_ratio": row["operating_expenses"] / revenue
+                "expense_ratio": operating_expenses / revenue
                 if revenue
                 else math.nan,
                 "maintenance_pct_rent": row["maintenance"] / row["rental_income"]
@@ -320,10 +460,14 @@ def summarize_cash_performance(
         "other_income",
         "operating_revenue",
         "operating_expenses",
+        "property_taxes",
+        "insurance",
+        "hoa",
         "maintenance",
         "noi",
         "mortgage_interest",
         "mortgage_principal",
+        "mortgage_insurance",
         "debt_service",
         "capex",
         "maintenance_pct_rent",
@@ -391,10 +535,14 @@ def summarize_cash_performance(
                     "other_income": 0,
                     "operating_revenue": revenue,
                     "operating_expenses": operating,
+                    "property_taxes": 0,
+                    "insurance": 0,
+                    "hoa": 0,
                     "maintenance": maintenance,
                     "noi": revenue - operating,
                     "mortgage_interest": _number(baseline.get("mortgage_interest")),
                     "mortgage_principal": _number(baseline.get("mortgage_principal")),
+                    "mortgage_insurance": 0,
                     "debt_service": _number(baseline.get("total_debt_tax_insurance")),
                     "capex": capex,
                     "cash_flow_after_debt": _number(
@@ -425,10 +573,14 @@ def summarize_cash_performance(
         "other_income",
         "operating_revenue",
         "operating_expenses",
+        "property_taxes",
+        "insurance",
+        "hoa",
         "maintenance",
         "noi",
         "mortgage_interest",
         "mortgage_principal",
+        "mortgage_insurance",
         "debt_service",
         "capex",
         "cash_flow_after_debt",

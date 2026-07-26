@@ -27,7 +27,7 @@ def main() -> None:
     manager.apply_statement_history_seed(
         root / "data" / "statement_history_through_2026_06.json"
     )
-    manager.refresh_for_calculation_version("4.0.0")
+    manager.refresh_for_calculation_version("5.3.0")
     pdfs = []
     for path in args.paths:
         pdfs.extend(sorted(path.glob("*.pdf")) if path.is_dir() else [path])
